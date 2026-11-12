@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="StudyStyle">
+  <defs>
+    <linearGradient id="ssArc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5A6AE8"/>
+      <stop offset="100%" stop-color="#25166B"/>
+    </linearGradient>
+  </defs>
+  <path d="M226.5 88.6 A170 170 0 0 1 423.4 226.5" fill="none" stroke="#9DA4F3" stroke-width="44" stroke-linecap="round"/>
+  <path d="M415.7 314.1 A170 170 0 0 1 146.7 386.2" fill="none" stroke="url(#ssArc)" stroke-width="44" stroke-linecap="round"/>
+  <circle cx="146.7" cy="386.2" r="34" fill="#4630CF" stroke="#F7F8FA" stroke-width="10"/>
+  <rect x="214" y="202" width="84" height="108" rx="16" fill="#F7F8FA" stroke="#4630CF" stroke-width="8"/>
+  <line x1="230" y1="242" x2="282" y2="242" stroke="#9DA4F3" stroke-width="9" stroke-linecap="round"/>
+  <line x1="230" y1="266" x2="266" y2="266" stroke="#9DA4F3" stroke-width="9" stroke-linecap="round"/>
+</svg>

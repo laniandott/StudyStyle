@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#F7F8FA" />
+    <title>StudyStyle · 间隔提醒</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./domain.cjs"></script>
+    <script defer src="./app.js"></script>
+
+    <!-- 图标 sprite：24×24 网格 / 1.5px 线性描边 / round cap+join / fill:none / stroke:currentColor -->
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <symbol id="i-logo" viewBox="0 0 64 64">
+        <path d="M28.31 11.08 A21.25 21.25 0 0 1 52.93 28.31" fill="none" stroke="#9DA4F3" stroke-width="5.5" stroke-linecap="round"/>
+        <path d="M51.96 39.26 A21.25 21.25 0 0 1 18.34 48.28" fill="none" stroke="#4630CF" stroke-width="5.5" stroke-linecap="round"/>
+        <circle cx="18.34" cy="48.28" r="4.25" fill="#4630CF" stroke="#F7F8FA" stroke-width="1.25"/>
+        <rect x="26.75" y="25.25" width="10.5" height="13.5" rx="2" fill="#F7F8FA" stroke="#4630CF" stroke-width="1"/>
+        <rect x="28.75" y="29.5" width="6.5" height="1.15" rx="0.57" fill="#9DA4F3"/>
+        <rect x="28.75" y="32.4" width="4.5" height="1.15" rx="0.57" fill="#9DA4F3"/>
+      </symbol>
+      <symbol id="i-today" viewBox="0 0 24 24">
+        <rect x="3" y="4.5" width="18" height="16" rx="3" />
+        <path d="M3 9.5h18M8 2.5v4M16 2.5v4" />
+        <path d="M12.5 12.6v2.6l1.9 1.1" />
+      </symbol>
+      <symbol id="i-library" viewBox="0 0 24 24">
+        <rect x="3" y="5.5" width="13" height="15" rx="2.5" />
+        <path d="M7.5 3h9a4 4 0 0 1 4 4v9" />
+      </symbol>
+      <symbol id="i-history" viewBox="0 0 24 24">
+        <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+        <path d="M3.2 4.5V9h4.5" />
+        <path d="M12 7.5V12l3 1.8" />
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" />
+        <path d="M19.1 14.6a1.5 1.5 0 0 0 .3 1.7l.1.1a1.8 1.8 0 1 1-2.6 2.6l-.1-.1a1.5 1.5 0 0 0-1.7-.3 1.5 1.5 0 0 0-.9 1.4v.2a1.8 1.8 0 1 1-3.6 0v-.1a1.5 1.5 0 0 0-1-1.4 1.5 1.5 0 0 0-1.7.3l-.1.1a1.8 1.8 0 1 1-2.6-2.6l.1-.1a1.5 1.5 0 0 0 .3-1.7 1.5 1.5 0 0 0-1.4-.9h-.2a1.8 1.8 0 1 1 0-3.6h.1a1.5 1.5 0 0 0 1.4-1 1.5 1.5 0 0 0-.3-1.7l-.1-.1a1.8 1.8 0 1 1 2.6-2.6l.1.1a1.5 1.5 0 0 0 1.7.3h.1a1.5 1.5 0 0 0 .9-1.4v-.2a1.8 1.8 0 1 1 3.6 0v.1a1.5 1.5 0 0 0 .9 1.4 1.5 1.5 0 0 0 1.7-.3l.1-.1a1.8 1.8 0 1 1 2.6 2.6l-.1.1a1.5 1.5 0 0 0-.3 1.7v.1a1.5 1.5 0 0 0 1.4.9h.2a1.8 1.8 0 1 1 0 3.6h-.1a1.5 1.5 0 0 0-1.4.9Z" />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-3.9-3.9" />
+      </symbol>
+      <symbol id="i-tag" viewBox="0 0 24 24">
+        <path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2A2 2 0 0 1 2.8 12V4.8A2 2 0 0 1 4.8 2.8H12a2 2 0 0 1 1.4.6l7.2 7.2a2 2 0 0 1 0 2.8Z" />
+        <circle cx="7.5" cy="7.5" r="1.3" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m4.5 12.5 5 5 10-11" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="M6 6l12 12M18 6 6 18" />
+      </symbol>
+      <symbol id="i-chevron-down" viewBox="0 0 24 24">
+        <path d="m6 9.5 6 6 6-6" />
+      </symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24">
+        <path d="m9.5 6 6 6-6 6" />
+      </symbol>
+      <symbol id="i-filter" viewBox="0 0 24 24">
+        <path d="M3.5 5.5h17l-6.5 8v5.5l-4 2v-7.5z" />
+      </symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+        <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+        <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+        <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+      </symbol>
+      <symbol id="i-layout-grid" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+        <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+        <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+        <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+      </symbol>
+      <symbol id="i-list" viewBox="0 0 24 24">
+        <path d="M8 6h13M8 12h13M8 18h13M3.6 6h.01M3.6 12h.01M3.6 18h.01" />
+      </symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24">
+        <path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />
+        <path d="m14.5 6.5 3 3" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M4 6.5h16M9.5 6.5V4.8A1.8 1.8 0 0 1 11.3 3h1.4a1.8 1.8 0 0 1 1.8 1.8v1.7M6.5 6.5 7.4 19a2 2 0 0 0 2 1.9h5.2a2 2 0 0 0 2-1.9l.9-12.5" />
+        <path d="M10.5 10.5v6M13.5 10.5v6" />
+      </symbol>
+      <symbol id="i-undo" viewBox="0 0 24 24">
+        <path d="M3.5 8.5h9a5.5 5.5 0 0 1 0 11H8" />
+        <path d="M7 4.5 3 8.5l4 4" />
+      </symbol>
+      <symbol id="i-dice" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+        <circle cx="8.5" cy="8.5" r="1.3" />
+        <circle cx="15.5" cy="15.5" r="1.3" />
+        <circle cx="12" cy="12" r="1.3" />
+      </symbol>
+      <symbol id="i-keyboard" viewBox="0 0 24 24">
+        <rect x="2.5" y="6" width="19" height="12" rx="2.5" />
+        <path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M8 14h8" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M20.5 14.2A8.5 8.5 0 1 1 9.8 3.5a6.7 6.7 0 0 0 10.7 10.7Z" />
+      </symbol>
+      <symbol id="i-sync" viewBox="0 0 24 24">
+        <path d="M20 11a8 8 0 0 0-13.7-5.6L3.5 8" />
+        <path d="M4 13a8 8 0 0 0 13.7 5.6l2.8-2.6" />
+        <path d="M3.5 4v4h4M20.5 20v-4h-4" />
+      </symbol>
+      <symbol id="i-bookmark" viewBox="0 0 24 24">
+        <path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21l-6-3.5L6 21Z" />
+      </symbol>
+      <symbol id="i-cloze" viewBox="0 0 24 24">
+        <rect x="3" y="5" width="18" height="14" rx="3" stroke-dasharray="3 2.5" />
+        <path d="M8 12h8" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v5.5M12 7.8h.01" />
+      </symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24">
+        <path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20.2h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+        <path d="M12 9v4.5M12 17h.01" />
+      </symbol>
+      <symbol id="i-danger" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7.5v5M12 16.2h.01" />
+      </symbol>
+      <symbol id="i-waves" viewBox="0 0 24 24">
+        <path d="M2.5 8.5c2-2 4-2 6 0s4 2 6 0 4-2 6 0M2.5 14c2-2 4-2 6 0s4 2 6 0 4-2 6 0M2.5 19.5c2-2 4-2 6 0s4 2 6 0 4-2 6 0" />
+      </symbol>
+      <symbol id="i-flame" viewBox="0 0 24 24">
+        <path d="M12 21c3.6 0 6-2.4 6-5.6 0-4.2-4.3-5.6-3.4-11.4-3 1.6-4.6 4.2-4.6 6.6 0 1.6.6 2.6.6 3.6 0 1-.8 1.8-1.8 1.8-1.2 0-2-1-2-2.4-1 1.4-1.8 3-1.8 5C5 18.6 8 21 12 21Z" />
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5.3l3.4 2" />
+      </symbol>
+      <symbol id="i-chart" viewBox="0 0 24 24">
+        <path d="M3.5 20.5h17" />
+        <rect x="5" y="11" width="3.6" height="6.5" rx="1" />
+        <rect x="10.2" y="6" width="3.6" height="11.5" rx="1" />
+        <rect x="15.4" y="13" width="3.6" height="4.5" rx="1" />
+      </symbol>
+      <symbol id="i-pen-line" viewBox="0 0 24 24">
+        <path d="M4 20l4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" />
+        <path d="m13.5 7.5 3 3" />
+      </symbol>
+      <symbol id="i-lightbulb" viewBox="0 0 24 24">
+        <path d="M9 18h6M10 21h4" />
+        <path d="M12 3a6 6 0 0 0-3.6 10.8c.6.5.9 1.1 1 1.8l.1.9h5l.1-.9c.1-.7.4-1.3 1-1.8A6 6 0 0 0 12 3Z" />
+      </symbol>
+      <symbol id="i-scale" viewBox="0 0 24 24">
+        <path d="M12 3.5v17M6.5 20.5h11" />
+        <path d="M3.5 7h6l-3 6a3 3 0 0 1-6 0l3-6ZM14.5 7h6l-3 6a3 3 0 0 1-6 0l3-6Z" />
+      </symbol>
+      <symbol id="i-book" viewBox="0 0 24 24">
+        <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H18a2 2 0 0 1 2 2v13.5H6.5A2.5 2.5 0 0 0 4 21Z" />
+        <path d="M4 17.5V21h16" />
+      </symbol>
+      <symbol id="i-archive" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="4.5" rx="1.5" />
+        <path d="M5 8.5V19a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5M10 12.5h4" />
+      </symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24">
+        <path d="M7 18.5a4 4 0 0 1-.4-8A5.5 5.5 0 0 1 17 9.6a3.95 3.95 0 0 1 .5 7.9H7Z" />
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+        <circle cx="16" cy="7" r="2" />
+        <circle cx="10" cy="17" r="2" />
+      </symbol>
+      <symbol id="i-check-square" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+        <path d="m8 12 3 3 5-6" />
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24">
+        <path d="M8 5.5 18.5 12 8 18.5Z" />
+      </symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24">
+        <rect x="3.5" y="5" width="17" height="15" rx="3" />
+        <path d="M3.5 10h17M8 3v4M16 3v4" />
+      </symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24">
+        <path d="M13.5 2.5 4 13.5h6l-1.5 8 9.5-11h-6l1.5-8Z" />
+      </symbol>
+      <symbol id="i-brain" viewBox="0 0 24 24">
+        <path d="M9.5 4.5A3 3 0 0 0 6.6 8a3 3 0 0 0-2 4.7A3 3 0 0 0 7 17.5a2.8 2.8 0 0 0 5.5.8V5.8a2.8 2.8 0 0 0-3-1.3Z" />
+        <path d="M14.5 4.5A3 3 0 0 1 17.4 8a3 3 0 0 1 2 4.7 3 3 0 0 1-2.4 4.8 2.8 2.8 0 0 1-5.5.8V5.8a2.8 2.8 0 0 1 3-1.3Z" />
+      </symbol>
+      <symbol id="i-palette" viewBox="0 0 24 24">
+        <path d="M12 3.5a8.5 8.5 0 0 0 0 17c1.2 0 1.8-.9 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.6 1.7-1.6h1.6a4.4 4.4 0 0 0 4.4-4.4c0-3.8-4.4-6.8-8.5-6.8Z" />
+        <circle cx="8" cy="10" r="1" />
+        <circle cx="12" cy="7.5" r="1" />
+        <circle cx="16" cy="10" r="1" />
+      </symbol>
+      <symbol id="i-sparkles" viewBox="0 0 24 24">
+        <path d="m12 3 1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8L12 3Z" />
+        <path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8.8-2Z" />
+      </symbol>
+      <symbol id="i-help" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9.6 9.3a2.5 2.5 0 1 1 3.3 2.4c-.6.2-.9.8-.9 1.4v.4M12 17h.01" />
+      </symbol>
+      <symbol id="i-cards" viewBox="0 0 24 24">
+        <rect x="3" y="6" width="12" height="14" rx="2.5" />
+        <path d="M8 3.5h9.5a3 3 0 0 1 3 3V17" />
+      </symbol>
+      <symbol id="i-more" viewBox="0 0 24 24">
+        <circle cx="6" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+        <circle cx="18" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      </symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24">
+        <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3.5v11M7.5 10.5 12 15l4.5-4.5" />
+        <path d="M4.5 17.5v1.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-1.5" />
+      </symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24">
+        <path d="M12 15.5v-11M7.5 8.5 12 4l4.5 4.5" />
+        <path d="M4.5 17.5v1.5a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-1.5" />
+      </symbol>
+    </svg>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#today" data-view="today" aria-label="StudyStyle 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 512 512" focusable="false">
+              <rect width="512" height="512" rx="112" fill="#4630CF" />
+              <path d="M226.5 88.6 A170 170 0 0 1 423.4 226.5" fill="none" stroke="#C3C8FB" stroke-width="44" stroke-linecap="round" />
+              <path d="M415.7 314.1 A170 170 0 0 1 146.7 386.2" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" />
+              <circle cx="146.7" cy="386.2" r="30" fill="#FFFFFF" stroke="#4A34C8" stroke-width="12" />
+              <rect x="216" y="216" width="80" height="80" rx="18" fill="#FFFFFF" />
+            </svg>
+          </span>
+          <span>StudyStyle<small>间隔复习</small></span>
+        </a>
+        <div class="nav-caption">工作区</div>
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item active" data-view="today" type="button">
+            <span class="nav-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-today"></use></svg></span>
+            <span>今日复习</span>
+            <span class="nav-count" id="navDueCount"></span>
+          </button>
+          <button class="nav-item" data-view="library" type="button">
+            <span class="nav-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-library"></use></svg></span>
+            <span>全部卡片</span>
+          </button>
+          <button class="nav-item" data-view="history" type="button">
+            <span class="nav-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-history"></use></svg></span>
+            <span>复习记录</span>
+          </button>
+        </nav>
+        <div class="side-divider"></div>
+        <div class="nav-caption nav-caption-row">
+          <span>科目笔记本</span>
+          <button type="button" class="caption-action-btn" data-action="open-notebook-dialog" title="新建科目笔记本" aria-label="新建科目笔记本">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>
+          </button>
+        </div>
+        <div class="bag-list notebook-nav-list" id="notebookNav"></div>
+        <div class="side-divider"></div>
+        <div class="nav-caption">按等级筛选</div>
+        <div class="bag-list" id="bagNav"></div>
+        <div class="sidebar-bottom">
+          <span class="sync-dot" id="syncDot" aria-hidden="true"></span>
+          <span id="syncLabel">仅本机保存</span>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="top-actions">
+            <span class="today-date" id="todayDate"></span>
+            <button class="icon-button" id="themeToggleButton" type="button" title="切换深色/浅色外观" aria-label="切换主题">
+              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-moon"></use></svg>
+            </button>
+            <button class="icon-button" id="helpDialogButton" type="button" title="快捷键与语法速查 (?)" aria-label="快捷键帮助">
+              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-help"></use></svg>
+            </button>
+            <span class="top-sep" aria-hidden="true"></span>
+            <button class="icon-button" id="settingsButton" type="button" data-view="settings" title="设置与同步" aria-label="设置与同步">
+              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-settings"></use></svg>
+            </button>
+            <button class="button button-primary" id="addCardButton" type="button" title="新增卡片">
+              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>
+              <span class="button-label">新增卡片</span>
+            </button>
+          </div>
+        </header>
+        <section class="content" id="viewRoot">
+          <div class="skeleton" aria-hidden="true">
+            <div class="skeleton-block title"></div>
+            <div class="skeleton-block band"></div>
+            <div class="skeleton-block row"></div>
+            <div class="skeleton-block row"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="cardDialog" class="dialog" aria-labelledby="cardDialogTitle">
+      <form id="cardForm" method="dialog">
+        <div class="dialog-head">
+          <h2 id="cardDialogTitle">新增卡片</h2>
+          <button type="button" class="icon-button" data-close-dialog aria-label="关闭">
+            <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+          </button>
+        </div>
+        <input type="hidden" name="id" />
+        <label class="field-label" for="cardNotebook">所属科目笔记本 <span class="optional">选择已有科目本或直接输入新科目名称</span></label>
+        <input class="text-input" id="cardNotebook" name="notebook" maxlength="40" placeholder="例如：生物 / 计算机网络 / 高等数学（留空归入默认笔记本）" />
+        <div class="quick-tags" id="quickNotebookList"></div>
+        <label class="field-label" for="cardTitle">标题</label>
+        <input class="text-input" id="cardTitle" name="title" maxlength="120" required placeholder="例如：光合作用的过程" />
+        <div class="field-row">
+          <label class="field-label" for="cardOutline">默背 / 默写大纲</label>
+          <span class="field-hint">支持 Tab 缩进、**加粗** 与 ==挖空==（将作为自测关键词）</span>
+        </div>
+        <div class="md-toolbar" id="mdToolbar">
+          <button type="button" class="md-tool-btn" data-md-wrap="list" title="插入列表项">• 列表</button>
+          <button type="button" class="md-tool-btn" data-md-wrap="bold" title="加粗重点词 (Ctrl+B)">**加粗**</button>
+          <button type="button" class="md-tool-btn" data-md-wrap="cloze" title="挖空遮罩 (Ctrl+M)">==挖空==</button>
+          <button type="button" class="md-tool-btn" data-md-wrap="code" title="行内代码">`代码`</button>
+          <span class="toolbar-sep" aria-hidden="true">|</span>
+          <button type="button" class="md-tool-btn tpl-btn" data-note-template="cornell" title="插入康奈尔线索笔记框架">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>康奈尔模板
+          </button>
+          <button type="button" class="md-tool-btn tpl-btn" data-note-template="feynman" title="插入费曼四步讲授框架">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>费曼模板
+          </button>
+          <button type="button" class="md-tool-btn tpl-btn" data-note-template="compare" title="插入对比辨析框架">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-scale"></use></svg>对比模板
+          </button>
+          <button type="button" class="md-tool-btn md-preview-btn" id="toggleOutlinePreview">预览效果</button>
+        </div>
+        <textarea class="text-area outline-input" id="cardOutline" name="outline" rows="9" required placeholder="- 第一阶段：**光反应**&#10;  - 场所：==类囊体薄膜==&#10;  - 产物：ATP、NADPH、O2&#10;- 第二阶段：暗反应（卡尔文循环）"></textarea>
+        <div class="answer-panel hidden" id="cardOutlinePreview"></div>
+        <details class="ios-fold-section" id="cardMetaFold">
+          <summary class="ios-fold-summary">
+            <span class="fold-title-group">
+              <span class="fold-icon"><svg class="icon" aria-hidden="true" focusable="false"><use href="#i-tag"></use></svg></span>
+              <span>标签与首次到期日设置</span>
+            </span>
+            <span class="fold-badge" id="cardMetaSummaryHint">选填 · 默认次日复习</span>
+          </summary>
+          <div class="ios-fold-body">
+            <label class="field-label" for="cardTags">标签 <span class="optional">用逗号分隔或点击下方已有标签</span></label>
+            <input class="text-input" id="cardTags" name="tags" placeholder="生物, 必修一" />
+            <div class="quick-tags" id="quickTagList"></div>
+            <label class="field-label" for="cardDueDate">下次到期日期 <span class="optional">可手动调整改期</span></label>
+            <input class="text-input" id="cardDueDate" name="due_date" type="date" />
+          </div>
+        </details>
+        <div class="dialog-foot">
+          <button type="button" class="button button-quiet" data-close-dialog>取消</button>
+          <button type="submit" class="button button-primary">保存卡片 <kbd>Ctrl+↵</kbd></button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="reviewDialog" class="dialog review-dialog" aria-labelledby="reviewTitle">
+      <div class="review-progress-track" id="reviewProgressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="第 1 / 1 张">
+        <div class="review-progress-fill" id="reviewProgressBar" style="width: 0%"></div>
+      </div>
+      <form id="reviewForm" method="dialog">
+        <div class="review-topline">
+          <div class="inline-actions">
+            <span id="reviewPosition" class="review-pos-text">1 / 1</span>
+            <span id="reviewTimerBadge" class="review-timer" title="本卡回忆与复习用时">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-clock"></use></svg>
+              <span id="reviewTimerText">00:00</span>
+            </span>
+          </div>
+          <div class="inline-actions">
+            <button type="button" class="button button-quiet small-button hidden" id="undoReviewButton" title="撤销刚才保存的上一张评分 (U)">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-undo"></use></svg>撤销上一张
+            </button>
+            <button type="button" class="button button-quiet small-button" id="editInReviewButton" title="在复习中途顺手修改当前卡片内容 (E)">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-edit"></use></svg>编辑此卡
+            </button>
+            <button type="button" class="button button-outline small-button hidden" id="rerollRandomCard" title="随机模式换一张 (R)">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-dice"></use></svg>换一张
+            </button>
+            <button type="button" class="icon-button" data-close-dialog aria-label="关闭复习">
+              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+            </button>
+          </div>
+        </div>
+        <div class="review-badges">
+          <span id="reviewNotebookBadge" class="notebook-chip">默认笔记本</span>
+          <span id="reviewBagBadge" class="badge lv-1">待首次复习</span>
+          <span id="reviewInterval" class="muted"></span>
+        </div>
+        <h2 id="reviewTitle" class="review-title"></h2>
+        <ol class="stepper" id="stepper" aria-label="复习步骤">
+          <li class="stepper-item is-current" data-step="1" aria-current="step">回忆</li>
+          <li class="stepper-item" data-step="2">核对</li>
+          <li class="stepper-item" data-step="3">评分</li>
+        </ol>
+
+        <!-- 第 1 步：回忆 -->
+        <section class="recall-panel" id="recallPanel" aria-labelledby="recallPromptLabel">
+          <div class="recall-label">
+            <span id="recallPromptLabel">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-pen-line"></use></svg>
+              先主动回忆，再核对大纲
+            </span>
+            <div class="method-pill-group" id="reviewMethodSwitch" role="group" aria-label="学习方法切换">
+              <button type="button" class="method-pill active" data-study-method="blurting" title="空白主动默写">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-pen-line"></use></svg>默写
+              </button>
+              <button type="button" class="method-pill" data-study-method="feynman" title="费曼大白话讲授法">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>费曼
+              </button>
+              <button type="button" class="method-pill" data-study-method="cornell" title="康奈尔主干线索提问法">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>康奈尔
+              </button>
+            </div>
+          </div>
+          <div class="cornell-cues-box hidden" id="cornellCuesBox"></div>
+          <label class="sr-only" for="recallInput">回忆草稿</label>
+          <textarea class="text-area recall-input" id="recallInput" name="recall" rows="5" placeholder="在这里默写提纲要点（若大纲含 **加粗** 或 ==挖空== 词，展开大纲时会自动核对命中率）"></textarea>
+          <div class="recall-actions">
+            <button class="text-button" id="clearRecall" type="button">清空草稿</button>
+            <button class="button button-outline" id="cantRecall" type="button">想不起来</button>
+            <button class="button button-primary" id="revealOutline" type="button">查看大纲 <kbd>Space</kbd></button>
+          </div>
+        </section>
+
+        <!-- 第 2 步：核对 -->
+        <section class="answer-panel notebook-sheet hidden" id="answerPanel" tabindex="-1" aria-labelledby="answerHeading">
+          <div class="last-note-alert hidden" id="lastNoteAlert"></div>
+          <div class="keyterm-check-bar hidden" id="keyTermCheckBar" aria-live="polite"></div>
+          <div class="answer-panel-head">
+            <h3 id="answerHeading">卡片标准大纲</h3>
+            <button type="button" class="text-button hidden" id="toggleAllCloze">显隐全部挖空</button>
+          </div>
+          <div class="markdown-body" id="reviewOutline"></div>
+          <div class="recall-actions">
+            <button class="text-button" id="skipCard" type="button">跳过这张</button>
+            <button class="button button-outline" id="backToRecall" type="button">返回继续回忆</button>
+            <button class="button button-primary" id="goToScore" type="button">下一步：评分 →</button>
+          </div>
+        </section>
+
+        <!-- 第 3 步：评分 -->
+        <section class="score-section hidden" id="scoreSection" aria-labelledby="scoreHeading">
+          <div class="score-label-row">
+            <h3 id="scoreHeading">这次记得怎么样？</h3>
+            <span class="score-next" id="scoreNextHint"></span>
+          </div>
+          <p class="score-preselect hidden" id="scorePreselectHint"></p>
+          <div class="score-buttons" id="scoreButtons" role="radiogroup" aria-label="掌握程度评分"></div>
+          <div class="fine-score">
+            <label for="scoreRange">精确调整</label>
+            <input id="scoreRange" type="range" min="0" max="100" step="1" value="50" />
+            <output id="scoreOutput" for="scoreRange">50%</output>
+          </div>
+          <label class="field-label note-label" for="reviewNote">这次漏掉了什么 <span class="optional">选填</span></label>
+          <textarea class="text-area note-input" name="note" id="reviewNote" rows="2" placeholder="记下一处下次要留意的内容"></textarea>
+          <div class="schedule-preview" id="schedulePreview"></div>
+          <div class="review-submit-row">
+            <button class="button button-outline full-button hidden" id="saveAndFinishRandom" type="button" disabled>保存并结束</button>
+            <button class="button button-primary full-button" id="saveReview" type="submit" disabled>保存并继续</button>
+          </div>
+        </section>
+      </form>
+    </dialog>
+
+    <dialog id="helpDialog" class="dialog compact-dialog" aria-labelledby="helpDialogTitle">
+      <div class="dialog-head">
+        <h2 id="helpDialogTitle">快捷键与大纲语法</h2>
+        <button type="button" class="icon-button" data-close-dialog aria-label="关闭">
+          <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+        </button>
+      </div>
+      <div class="help-grid">
+        <div class="help-item"><span>新增卡片</span><kbd>N</kbd></div>
+        <div class="help-item"><span>随机抽卡自测</span><kbd>R</kbd></div>
+        <div class="help-item"><span>切换视图</span><kbd>Alt</kbd> + <kbd>1</kbd>–<kbd>4</kbd></div>
+        <div class="help-item"><span>聚焦搜索框</span><kbd>G</kbd> / <kbd>/</kbd></div>
+        <div class="help-item"><span>复习：上一步 / 下一步</span><kbd>Shift+Space</kbd> / <kbd>Space</kbd></div>
+        <div class="help-item"><span>复习：显隐挖空 / 切学习法</span><kbd>F</kbd> / <kbd>M</kbd></div>
+        <div class="help-item"><span>复习：编辑此卡 / 撤销上一张</span><kbd>E</kbd> / <kbd>U</kbd></div>
+        <div class="help-item"><span>快速选择 5 档评分</span><kbd>1</kbd> – <kbd>5</kbd></div>
+        <div class="help-item"><span>微调分数（±5）</span><kbd>←</kbd> / <kbd>→</kbd></div>
+        <div class="help-item"><span>提交评分 / 保存卡片</span><kbd>Ctrl + Enter</kbd></div>
+        <div class="help-item"><span>关闭弹窗</span><kbd>Esc</kbd></div>
+        <div class="help-item"><span>大纲列表缩进 / 退格</span><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></div>
+        <div class="help-item"><span>大纲加粗 / 挖空</span><kbd>Ctrl+B</kbd> / <kbd>Ctrl+M</kbd></div>
+      </div>
+      <div class="status-box" style="margin-top: 14px">
+        <strong>智能关键词自检：</strong>大纲中用 <code>**重点词**</code> 或 <code>==挖空词==</code> 标记的内容，不仅会在复习时高亮/遮罩，还会自动与你在"先回忆"框中默写的文字比对，统计命中率并支持一键将漏词填入备注。
+      </div>
+      <div class="dialog-foot">
+        <button type="button" class="button button-primary" data-close-dialog>知道了</button>
+      </div>
+    </dialog>
+
+    <dialog id="notebookDialog" class="dialog compact-dialog" aria-labelledby="notebookDialogTitle">
+      <form id="notebookForm" method="dialog">
+        <div class="dialog-head">
+          <h2 id="notebookDialogTitle">科目笔记本管理</h2>
+          <button type="button" class="icon-button" data-close-dialog aria-label="关闭">
+            <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+          </button>
+        </div>
+        <input type="hidden" name="oldName" id="notebookOldName" />
+        <label class="field-label" for="notebookNameInput">科目笔记本名称</label>
+        <input class="text-input" id="notebookNameInput" name="name" maxlength="40" required placeholder="例如：高等数学 / 考研英语 / 计算机网络" />
+        <label class="field-label">主题色标</label>
+        <div class="notebook-color-picker" id="notebookColorPicker" role="radiogroup" aria-label="笔记本主题色"></div>
+        <div class="notebook-manage-list" id="notebookManageList"></div>
+        <div class="dialog-foot">
+          <button type="button" class="button button-quiet" data-close-dialog>关闭</button>
+          <button type="submit" class="button button-primary" id="saveNotebookBtn">保存笔记本</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirmDialog" class="dialog compact-dialog" aria-labelledby="confirmTitle">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2 id="confirmTitle">确认操作</h2>
+          <button class="icon-button" value="cancel" aria-label="取消" type="submit">
+            <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+          </button>
+        </div>
+        <p id="confirmMessage" class="confirm-message"></p>
+        <div class="dialog-foot">
+          <button class="button button-quiet" value="cancel">取消</button>
+          <button class="button button-primary" id="confirmAction" value="confirm">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

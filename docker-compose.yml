@@ -1,0 +1,23 @@
+services:
+  studystyle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: studystyle
+    restart: unless-stopped
+    ports:
+      - "3880:3880"
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=3880
+      - DATA_DIR=/app/data
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3880/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

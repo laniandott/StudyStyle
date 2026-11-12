@@ -1,0 +1,1 @@
+(async()=>{await new Promise(r=>setTimeout(r,300)); const cards=JSON.parse(localStorage.getItem('studystyle-fallback-v1')||'[]').filter(d=>d.type==='card'); return {theme:document.documentElement.dataset.theme, cards:cards.length, bodyTheme:document.body.getAttribute('data-theme'), cls:document.documentElement.className};})()

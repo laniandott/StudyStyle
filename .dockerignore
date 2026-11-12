@@ -1,0 +1,11 @@
+.git
+.github
+.workbuddy
+node_modules
+data
+docs
+tools
+tests
+*.md
+.DS_Store
+.env
