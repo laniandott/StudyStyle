@@ -27,7 +27,8 @@ const addDays = (day, amount) => Domain.addLocalDays(day, amount);
 const fmtDate = (day, opts = { month: 'short', day: 'numeric' }) => day ? new Date(`${day}T12:00:00`).toLocaleDateString('zh-CN', opts) : '未安排';
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const intervalFor = (card, intervals = INTERVALS) => Domain.intervalDays(card.interval_index, intervals);
-const bagFor = card => Domain.scoreToBag(card.latest_memory_score);
+/* 用宽容版取袋：导入的历史数据可能含脏分数，不能让整页渲染崩溃 */
+const bagFor = card => Domain.scoreToBagSafe(card.latest_memory_score);
 /* 等级下标：0 = L1 待首次复习 …… 5 = L6 熟悉 */
 const bagIndex = card => bagFor(card) + 1;
 const bagInfo = card => BAG_ORDER[bagIndex(card)];
@@ -61,6 +62,9 @@ let reviewIndex = 0;
 let reviewMode = 'due';
 let reviewStep = 1;
 let preselectPending = null;
+let firstRecallDraft = null;
+let feedbackRecallMode = false;
+let feedbackRecallDraft = null;
 let currentReviewSettings = null;
 let todaySettings = null;
 let randomPool = [];
@@ -69,6 +73,8 @@ let finishAfterSave = false;
 let lastReviewSnapshot = null;
 let selectedScore = null;
 let selectedPreset = null;
+/* 当前卡的低分策略选择（hold/reset/advance）：null 表示用户未手动选过，沿用全局默认 */
+let lowCycleChoice = null;
 let toastTimer;
 let observedDay = localDay();
 let pendingDayRefresh = false;
@@ -90,13 +96,73 @@ function ensurePouchDB() {
 }
 
 let serverStoreActive = false;
+/* 服务端库版本号：服务端返回的 rev，用于乐观锁；服务端未升级时保持 null（走整库替换兼容路径） */
+let serverRev = null;
+/* 推送去抖：同一时间窗内的多次写入合并为一次全量 PUT，避免写放大 */
+let pushTimer = null;
+let pendingPushDocs = null;
+
+function writeLocalDocs(docs) {
+  try {
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(docs));
+  } catch (error) {
+    const isQuota = error?.name === 'QuotaExceededError' || error?.code === 22 || error?.code === 1014;
+    const message = isQuota
+      ? '本地存储空间已满，数据未保存。请导出备份后清理部分数据再重试。'
+      : '本地保存失败，数据未写入浏览器存储。';
+    showToast(message);
+    throw new Error(message, { cause: error });
+  }
+}
+
+/* 立即把待推送数据发出去（页面隐藏、导入完成等关键时机调用），避免防抖窗口内丢同步。
+   注意：必须直连 pushServerStoreNow，若改走 pushServerStore 会重新进入防抖，导致关页时数据根本发不出去。 */
+function flushServerStore() {
+  if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+  const docs = pendingPushDocs;
+  pendingPushDocs = null;
+  if (docs) pushServerStoreNow(docs);
+}
+
 function pushServerStore(docs) {
   if (typeof fetch !== 'function') return;
+  pendingPushDocs = docs;
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { pushTimer = null; const payload = pendingPushDocs; pendingPushDocs = null; if (payload) pushServerStoreNow(payload); }, 300);
+}
+function pushServerStoreNow(docs) {
+  if (typeof fetch !== 'function') return;
+  /* 携带 base_rev：服务端版本不一致时走合并而非整库覆盖，避免多设备互相抹除。
+     尚未拿到服务端 rev 时先取一次，否则会退化成无条件整库覆盖（架构审计 P0-2）。 */
+  if (!serverRev) {
+    fetch('/api/store', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!data || !data.rev) return;
+        serverRev = data.rev;
+        pushServerStoreNow(docs);
+      })
+      .catch(() => {});
+    return;
+  }
+  const body = { docs, base_rev: serverRev };
   fetch('/api/store', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ docs })
-  }).then(r => { if (r.ok) serverStoreActive = true; }).catch(() => {});
+    body: JSON.stringify(body)
+  }).then(r => { if (!r.ok) return; serverStoreActive = true; return r.json(); })
+    .then(data => {
+      if (data && data.rev) serverRev = data.rev;
+      /* 服务端返回合并结果时再与当前本地状态合并，避免覆盖并发编辑 */
+      if (data && data.merged && Array.isArray(data.docs)) {
+        const localDocs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+        const reconciled = Domain.reconcileDocSets(localDocs, data.docs);
+        writeLocalDocs(reconciled.docs);
+        showToast('已与服务器同步，合并了其他设备的更新');
+        if (reconciled.needsPush) pushServerStore(reconciled.docs);
+        render();
+      }
+    }).catch(() => {});
 }
 
 async function hydrateFromServerStore() {
@@ -108,28 +174,55 @@ async function hydrateFromServerStore() {
     const remoteDocs = Array.isArray(data?.docs) ? data.docs : [];
     const localDocs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
     serverStoreActive = true;
+    /* 记录服务端版本号，后续推送带上 base_rev 走乐观锁 */
+    if (data?.rev) serverRev = data.rev;
     if (remoteDocs.length === 0 && localDocs.length > 0) {
       pushServerStore(localDocs);
       return;
     }
     if (remoteDocs.length > 0) {
-      const merged = new Map();
-      for (const doc of localDocs) if (doc?._id) merged.set(doc._id, doc);
-      for (const doc of remoteDocs) if (doc?._id) merged.set(doc._id, doc);
-      const next = [...merged.values()];
-      localStorage.setItem(LOCAL_KEY, JSON.stringify(next));
-      if (next.length !== remoteDocs.length) pushServerStore(next);
+      /* 与服务端共用仲裁规则，墓碑始终代表删除意图。 */
+      const reconciled = Domain.reconcileDocSets(localDocs, remoteDocs);
+      writeLocalDocs(reconciled.docs);
+      if (reconciled.needsPush) pushServerStore(reconciled.docs);
     }
   } catch {}
 }
 
 function createLocalStore() {
+  /* 统一版本号：与 PouchDB 的 <数字>-<hash> 格式兼容，同毫秒内多次写入也不会撞号 */
+  let revCounter = 0;
+  const nextRev = () => `${++revCounter}-${Math.random().toString(16).slice(2, 10)}`;
+  /* _id 会进入 HTML 属性（data-review-card 等），在存储层统一限定字符集，
+     使所有写入路径自动免疫属性注入，不必依赖每个调用点自觉转义。 */
+  const SAFE_ID = /^[A-Za-z0-9:._-]{1,128}$/;
   return {
     async allDocs() { const docs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]'); return { rows: docs.map(doc => ({ doc })) }; },
-    async get(id) { const doc = (JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]')).find(item => item._id === id); if (!doc) throw { status: 404 }; return doc; },
-    async put(doc) { const docs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]'); const old = docs.findIndex(item => item._id === doc._id); doc._rev = String(Date.now()); if (old < 0) docs.push(doc); else docs[old] = doc; localStorage.setItem(LOCAL_KEY, JSON.stringify(docs)); pushServerStore(docs); return { ok: true, id: doc._id }; },
-    async remove(doc) { const docs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]').filter(item => item._id !== doc._id); localStorage.setItem(LOCAL_KEY, JSON.stringify(docs)); pushServerStore(docs); return { ok: true }; },
-    async bulkDocs(docs) { for (const doc of docs) await this.put(doc); return []; }
+    async get(id) { const doc = (JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]')).find(item => item._id === id && !item._deleted); if (!doc) throw { status: 404 }; return doc; },
+    async put(doc) { if (!SAFE_ID.test(String(doc?._id || ''))) throw new Error('非法的文档 _id'); const docs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]'); const old = docs.findIndex(item => item._id === doc._id); doc._rev = nextRev(); doc.updated_at = new Date().toISOString(); if (old < 0) docs.push(doc); else docs[old] = doc; writeLocalDocs(docs); pushServerStore(docs); return { ok: true, id: doc._id }; },
+    /* 删除写墓碑而非直接抹除：全量同步模型下「直接删除」会被服务端旧副本复活，
+       墓碑让删除意图也能传播到其它设备（架构审计 P0-1）。 */
+    async remove(doc) {
+      const docs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+      const rest = docs.filter(item => item._id !== doc._id);
+      const tombstone = { _id: doc._id, _deleted: true, _rev: nextRev(), updated_at: new Date().toISOString(), deleted_at: new Date().toISOString() };
+      rest.push(tombstone);
+      writeLocalDocs(rest);
+      pushServerStore(rest);
+      return { ok: true };
+    },
+    /* 批量写入：本地逐条落盘，但只在循环结束后推送一次，避免 N 次全量 PUT */
+    async bulkDocs(docs) {
+      let all = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+      for (const doc of docs) {
+        const old = all.findIndex(item => item._id === doc._id);
+        doc._rev = nextRev(); doc.updated_at = new Date().toISOString();
+        if (old < 0) all.push(doc); else all[old] = doc;
+      }
+      writeLocalDocs(all);
+      pushServerStore(all);
+      return [];
+    }
   };
 }
 
@@ -166,7 +259,8 @@ async function initStore() {
       interval_preset: 'balanced',
       hold_interval_below_score: 40,
       default_low_action: 'hold',
-      adaptive_leap: true,
+      /* 高分跳级默认关闭：计划 §6 明确将自适应记忆算法列为首版范围外，需用户主动开启 */
+      adaptive_leap: false,
       daily_review_limit: 25,
       study_method: 'blurting',
       theme: 'light'
@@ -178,9 +272,10 @@ async function initStore() {
   await render();
 }
 
-async function allDocs() { const result = await db.allDocs({ include_docs: true }); return result.rows.map(row => row.doc).filter(Boolean); }
+/* 墓碑（_deleted）是删除意图的传播载体，对业务读取一律透明过滤 */
+async function allDocs() { const result = await db.allDocs({ include_docs: true }); return result.rows.map(row => row.doc).filter(doc => doc && !doc._deleted); }
 async function getCards() { return (await allDocs()).filter(doc => doc.type === 'card' && !doc.archived_at); }
-async function getReviews() { return (await allDocs()).filter(doc => doc.type === 'review').sort((a, b) => b.reviewed_at.localeCompare(a.reviewed_at)); }
+async function getReviews() { return (await allDocs()).filter(doc => doc.type === 'review').sort((a, b) => String(b.reviewed_at || '').localeCompare(String(a.reviewed_at || ''))); }
 async function getSetting() { try { return await db.get('settings:main'); } catch { return null; } }
 async function saveSetting(settings) { const previous = await getSetting(); return db.put({ ...(previous || {}), ...settings, _id: 'settings:main', type: 'settings' }); }
 const cardNotebook = card => Domain.normalizeNotebook(card?.notebook);
@@ -190,7 +285,7 @@ function notebookChipHtml(nbName, notebooks = []) {
   const norm = Domain.normalizeNotebook(nbName);
   const found = notebooks.find(n => n.name === norm);
   const color = found?.color || 'indigo';
-  return `<span class="notebook-chip nb-color-${color}" data-notebook-filter="${escapeHtml(norm)}" title="切换到科目笔记本：${escapeHtml(norm)}">${icon('book')}<span>${escapeHtml(norm)}</span></span>`;
+  return `<button type="button" class="notebook-chip nb-color-${color}" data-notebook-filter="${escapeHtml(norm)}" title="切换到科目笔记本：${escapeHtml(norm)}">${icon('book')}<span>${escapeHtml(norm)}</span></button>`;
 }
 
 function notebookShelfHtml(notebooks, allCardsCount, allDueCount) {
@@ -230,7 +325,7 @@ function markdownToHtml(markdown) {
   let html = escapeHtml(markdown)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/==([^=]+)==/g, (match, word) => `<button type="button" class="cloze-mask" aria-label="挖空：${word}，点击显示答案">${word}</button>`);
+    .replace(/==([^=]+)==/g, (match, word) => `<button type="button" class="cloze-mask" aria-expanded="false" aria-label="挖空：${word}，点击显示答案" title="点击显示答案">${word}</button>`);
   const lines = html.split(/\r?\n/); let out = ''; let listOpen = false;
   for (const raw of lines) {
     const headingMatch = raw.match(/^(#{1,4})\s+(.*)$/);
@@ -288,21 +383,26 @@ async function render() {
   const due = filterByNotebook(allDue);
   const dueCount = $('#navDueCount'); if (dueCount) dueCount.textContent = due.length ? String(due.length) : '';
   const topDate = $('#todayDate'); if (topDate) topDate.textContent = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' });
+  const topPage = $('#topbarPageName');
+  if (topPage) {
+    const viewLabels = { today: '今日复习', library: '全部卡片', history: '复习记录', settings: '设置与同步' };
+    topPage.textContent = activeNotebookFilter ? `${viewLabels[view] || 'StudyStyle'} · ${activeNotebookFilter}` : (viewLabels[view] || 'StudyStyle');
+  }
   document.title = `${due.length ? `(${due.length}) ` : ''}StudyStyle · 间隔提醒`;
   const nbNav = $('#notebookNav');
   if (nbNav) {
-    const allNbItem = `<div class="bag-link ${activeNotebookFilter == null ? 'active' : ''}" data-notebook-filter="all">${icon('book')}<span class="bag-link-name">全部科目</span><span class="bag-link-count">${allCards.length}</span></div>`;
-    const nbItems = notebooks.map(nb => `<div class="bag-link ${activeNotebookFilter === nb.name ? 'active' : ''}" data-notebook-filter="${escapeHtml(nb.name)}" title="${escapeHtml(nb.name)}：共 ${nb.total} 张，今日待复习 ${nb.due} 张"><i class="nb-dot nb-color-${nb.color}"></i><span class="bag-link-name">${escapeHtml(nb.name)}</span><span class="bag-link-count">${nb.due > 0 ? `${nb.due}/${nb.total}` : nb.total}</span></div>`).join('');
+    const allNbItem = `<button type="button" class="bag-link ${activeNotebookFilter == null ? 'active' : ''}" data-notebook-filter="all">${icon('book')}<span class="bag-link-name">全部科目</span><span class="bag-link-count">${allCards.length || ''}</span></button>`;
+    const nbItems = notebooks.map(nb => `<button type="button" class="bag-link ${activeNotebookFilter === nb.name ? 'active' : ''}" data-notebook-filter="${escapeHtml(nb.name)}" title="${escapeHtml(nb.name)}：共 ${nb.total} 张，今日待复习 ${nb.due} 张"><i class="nb-dot nb-color-${nb.color}"></i><span class="bag-link-name">${escapeHtml(nb.name)}</span><span class="bag-link-count">${nb.due > 0 ? `${nb.due}/${nb.total}` : (nb.total || '')}</span></button>`).join('');
     nbNav.innerHTML = allNbItem + nbItems;
   }
   const counts = levelCounts(cards);
   const totalCards = Math.max(1, cards.length);
   const bagNav = $('#bagNav');
   if (bagNav) {
-    const allItem = `<div class="bag-link ${activeBagFilter == null ? 'active' : ''}" data-bag-filter="all"><span class="bag-link-name">全部</span><span class="bag-link-count">${cards.length}</span></div>`;
+    const allItem = `<button type="button" class="bag-link ${activeBagFilter == null ? 'active' : ''}" data-bag-filter="all"><span class="bag-link-name">全部</span><span class="bag-link-count">${cards.length || ''}</span></button>`;
     const levels = BAG_ORDER.map((level, index) => {
       const pct = cards.length ? Math.round((counts[index] / totalCards) * 100) : 0;
-      return `<div class="bag-link ${activeBagFilter === index - 1 ? 'active' : ''}" data-bag-filter="${index - 1}" title="${level.name}：${counts[index]} 张（${pct}%）"><i class="bag-dot ${levelClass(index)}"></i><span class="bag-link-name">${level.name}</span><span class="bag-link-count">${counts[index]}</span></div>`;
+      return `<button type="button" class="bag-link ${activeBagFilter === index - 1 ? 'active' : ''}" data-bag-filter="${index - 1}" title="${level.name}：${counts[index]} 张（${pct}%）"><i class="bag-dot ${levelClass(index)}"></i><span class="bag-link-name">${level.name}</span><span class="bag-link-count">${counts[index] || ''}</span></button>`;
     }).join('');
     bagNav.innerHTML = allItem + levels;
   }
@@ -327,8 +427,12 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
   const done = allReviews.filter(row => localDay(new Date(row.reviewed_at)) === today).length;
   const streakInfo = Domain.computeStreak(allReviews.map(row => localDay(new Date(row.reviewed_at))), today);
   const allFilteredDue = activeBagFilter == null ? due : due.filter(card => bagFor(card) === activeBagFilter);
-  const items = dailyLimit > 0 ? allFilteredDue.slice(0, dailyLimit) : allFilteredDue;
-  const overflowCount = Math.max(0, allFilteredDue.length - items.length);
+  /* 队列完整展示全部到期卡片（计划 §4.2「不丢失原则」：优先级只决定出场顺序，卡片不会因排后而消失）。
+     每日上限只作为「本轮建议量」提示，不再截断队列。 */
+  const items = allFilteredDue;
+  /* 队列完整展示全部到期卡片（计划 §4.2「不丢失原则」：优先级只决定出场顺序，卡片不会因排后而消失）。
+     每日上限只作为「本轮建议量」提示，不再截断队列。 */
+  const suggestedCount = dailyLimit > 0 ? Math.min(items.length, dailyLimit) : items.length;
   const totalTarget = done + items.length;
   const completionPct = totalTarget > 0 ? Math.round((done / totalTarget) * 100) : 0;
   const estMinutes = Math.max(1, Math.round(items.length * 0.8));
@@ -352,7 +456,7 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
   if (noCards) {
     band = `<div class="today-band today-band-plain">
       <span class="band-plain-icon">${icon('info', 'icon icon-24')}</span>
-      <span class="band-plain-text">还没有任何卡片。支持 Markdown 与 ==挖空== 语法，复习时自动核对命中率。</span>
+      <span class="band-plain-text">还没有任何卡片。支持 Markdown 与 ==挖空== 语法，复习时可辅助检查标记词。</span>
       <div class="band-zone band-zone-actions">
         <button class="button button-primary" data-action="add">创建第一张卡片</button>
         <button class="button button-outline" data-action="seed-demo">${icon('sparkles')}载入示例卡片</button>
@@ -367,7 +471,7 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
   } else {
     /* 每日上限并入中区说明文字（不再是独立 chip），数值本身可就地展开 5 档 */
     const limitText = `<button type="button" class="band-limit" data-action="open-limit" aria-haspopup="true" aria-expanded="false" title="调整每日复习上限">${dailyLimit || '不限'}</button>`;
-    const caption = `已完成 <strong>${done}</strong> · 今日上限 ${limitText} · 预估 ${estMinutes} 分钟`;
+    const caption = `已完成 <strong>${done}</strong> · 今日上限 ${limitText} · 预估 ${estMinutes} 分钟${suggestedCount < items.length ? ` · 建议先做 ${suggestedCount} 张` : ''}`;
     band = `<div class="today-band">
       <div class="band-zone band-zone-amount">
         <strong>${items.length}</strong><span>张待复习</span>
@@ -377,9 +481,15 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
         <div class="linear-progress-text">${caption}${limitReached ? `<span class="band-warning">已达今日上限 ${dailyLimit}</span>` : ''}</div>
       </div>
       <div class="band-zone band-zone-actions">
-        <button class="button button-primary" data-action="start-today" ${limitReached || !items.length ? 'disabled' : ''}>开始复习</button>
-        <button class="button button-outline" data-action="${limitReached ? 'start-today-all' : 'random-draw'}">${limitReached ? '提前复习（不受上限）' : `${icon('dice')}随机抽卡`}</button>
-        <button type="button" class="text-button" data-action="goto-library">全部卡片 →</button>
+        <button class="button button-primary" data-action="start-today" ${limitReached || !items.length ? 'disabled' : ''}>${icon('play')}开始复习</button>
+        <details class="action-menu today-more-menu">
+          <summary class="button button-outline">更多复习方式${icon('chevron-down')}</summary>
+          <div class="action-menu-panel">
+            <button class="action-menu-item" data-action="${limitReached ? 'start-today-all' : 'random-draw'}" type="button">${icon('dice')}<span>${limitReached ? '提前复习全部到期卡' : '随机抽卡自测'}</span></button>
+            ${notebooks.length > 1 && activeNotebookFilter == null ? `<button class="action-menu-item" data-action="start-mixed" type="button">${icon('cards')}<span>跨科目混合复习</span></button>` : ''}
+            <button class="action-menu-item" data-action="goto-library" type="button">${icon('library')}<span>打开全部卡片</span></button>
+          </div>
+        </details>
       </div>
     </div>`;
   }
@@ -397,7 +507,7 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
       <div class="queue-meta">${notebookChipHtml(card.notebook, notebooks)}${badgeHtml(card)}<span class="cycle-chip">周期 ${intervalFor(card, intervals)} 天</span>${(card.tags || []).slice(0, 3).map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>
     </div>
     ${fmtDue(card)}
-    <button class="button button-outline queue-open" data-review-card="${card._id}">复习${icon('chevron-right')}</button>
+    <button class="button button-outline queue-open" data-review-card="${escapeHtml(card._id)}">复习${icon('chevron-right')}</button>
   </div>`).join('');
   /* 首次使用（0 卡片）时队列整段不渲染，避免同一个事实重复三遍 */
   const queue = noCards ? '' : items.length
@@ -457,8 +567,9 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
     </div>
   </details>`;
 
-  const overflowNote = overflowCount > 0
-    ? `<div class="inline-actions" style="justify-content:flex-end;margin-top:var(--sp-3)"><span class="field-hint">已按每日上限精选 ${items.length} 张（其余 ${overflowCount} 张暂缓）</span><button class="text-button" data-action="balance-overdue">${icon('waves')}智能平滑分流</button></div>`
+  /* 超量提示：队列仍完整展示，仅建议分批处理并提供一键顺延入口 */
+  const overflowNote = dailyLimit > 0 && items.length > dailyLimit
+    ? `<div class="inline-actions" style="justify-content:flex-end;margin-top:var(--sp-3)"><span class="field-hint">今日共 ${items.length} 张到期，超过建议量 ${dailyLimit} 张 · 可分批完成或顺延到明天</span><button class="text-button" data-action="snooze">${icon('waves')}顺延剩余到期卡片</button></div>`
     : '';
 
   return `<div class="today-head">
@@ -466,19 +577,21 @@ async function renderToday(cards, due, notebooks = [], allCards = cards, allDue 
     ${nbShelf}
     ${band}
   </div>
-  ${filterRow}
+  ${noCards ? '' : filterRow}
   <div class="section-heading">
     <div><h2>${queueTitle}</h2><p>${noCards ? '创建卡片后，到期项会按记忆等级排到这里' : `按记忆等级从低到高排序，同等级内逾期更久的优先${dailyLimit > 0 ? `（每日上限 ${dailyLimit} 张）` : ''}`}</p></div>
-    <div class="inline-actions">${activeBagFilter != null ? '<button class="text-button" data-action="clear-filter">显示全部等级</button>' : ''}${noCards ? '' : `<div class="queue-summary">本轮待完成 <strong>${items.length}</strong>${overflowCount ? ` <small class="muted">/ 共 ${allFilteredDue.length}</small>` : ''} 张</div>`}</div>
+    <div class="inline-actions">${activeBagFilter != null ? '<button class="text-button" data-action="clear-filter">显示全部等级</button>' : ''}${noCards ? '' : `<div class="queue-summary">本轮待完成 <strong>${items.length}</strong> 张</div>`}</div>
   </div>
   ${queue}
   ${overflowNote}
-  ${insights}`;
+  ${noCards ? '' : insights}`;
 }
 
 /* ===================== 卡片库 ===================== */
 async function renderLibrary(cards, notebooks = [], allCards = cards, allDue = []) {
   const archived = (await allDocs()).filter(doc => doc.type === 'card' && doc.archived_at);
+  /* 周期天数取用户实际配置的阶梯，否则卡片库显示的「周期 N 天」与复习时的排期不一致 */
+  const intervals = (await getSetting())?.interval_days || INTERVALS;
   const allTags = [...new Set(cards.flatMap(card => card.tags || []))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
   const sortMode = libraryFilter.sort || 'due';
   const layoutMode = libraryFilter.layout || 'list';
@@ -504,7 +617,7 @@ async function renderLibrary(cards, notebooks = [], allCards = cards, allDue = [
   return `<div class="page-heading">
     <div><h1>全部卡片${activeNotebookFilter ? ` · ${escapeHtml(activeNotebookFilter)}` : ''}</h1><p class="page-subtitle">${cards.length} 张在当前科目复习池中 · ${archived.length} 张已归档 · 点击卡片标题可展开大纲</p></div>
     <div class="inline-actions">
-      ${cards.length ? `<button class="button button-outline ${batchMode ? 'active' : ''}" data-action="toggle-batch-mode">${icon('check-square')}${batchMode ? '退出批量' : '批量管理'}</button><button class="button button-outline" data-action="random-draw-library">${icon('dice')}随机抽卡</button>` : ''}
+      ${cards.length ? `<details class="action-menu library-more-menu"><summary class="button button-outline">管理与练习${icon('chevron-down')}</summary><div class="action-menu-panel"><button class="action-menu-item" data-action="toggle-batch-mode" type="button">${icon('check-square')}<span>${batchMode ? '退出批量管理' : '批量管理卡片'}</span></button><button class="action-menu-item" data-action="random-draw-library" type="button">${icon('dice')}<span>随机抽卡自测</span></button></div></details>` : ''}
       <button class="button button-primary" data-action="add">${icon('plus')}新增卡片</button>
     </div>
   </div>
@@ -513,7 +626,7 @@ async function renderLibrary(cards, notebooks = [], allCards = cards, allDue = [
   <div class="library-primary-bar">
     <div class="search-box">${icon('search')}<input class="search-input" id="cardSearch" type="search" aria-label="搜索卡片标题、大纲、科目或标签" placeholder="搜索卡片标题、大纲、科目或标签…" value="${escapeHtml(libraryFilter.query)}" /></div>
     <span class="library-result-count" id="libraryResultCount" aria-live="polite">${cards.length} 张</span>
-    <button type="button" class="button button-outline filter-drawer-toggle ${filterOpen ? 'active' : ''}" data-action="toggle-lib-filters">${icon('sliders')}筛选${activeFilterCount ? ` <span class="filter-count-pill">${activeFilterCount}</span>` : ''}</button>
+    <button type="button" class="button button-outline filter-drawer-toggle ${filterOpen ? 'active' : ''}" data-action="toggle-lib-filters">${icon('sliders')}筛选 <span class="filter-count-pill ${activeFilterCount ? '' : 'hidden'}" id="libraryFilterCountPill">${activeFilterCount || ''}</span></button>
     <button type="button" class="text-button hidden" id="libraryClearFilters" data-action="clear-filters">清除筛选</button>
     <div class="view-mode-switch" role="group" aria-label="视图切换" ${cards.length >= 24 ? '' : 'hidden'}>
       <button type="button" class="view-mode-btn ${layoutMode === 'list' ? 'active' : ''}" data-lib-layout="list" title="列表视图">${icon('list')}列表</button>
@@ -527,7 +640,7 @@ async function renderLibrary(cards, notebooks = [], allCards = cards, allDue = [
       <select class="select-input" id="sortFilter" aria-label="排序方式"><option value="due" ${sortMode === 'due' ? 'selected' : ''}>按到期日排序</option><option value="score" ${sortMode === 'score' ? 'selected' : ''}>按记忆度(低→高)</option><option value="created" ${sortMode === 'created' ? 'selected' : ''}>按最新创建</option><option value="title" ${sortMode === 'title' ? 'selected' : ''}>按标题名称</option></select>
     </div>
   </div>
-  <div class="library-list ${layoutMode === 'grid' ? 'grid-mode' : ''}" id="libraryList">${renderLibraryRows(cards, notebooks)}</div>
+  <div class="library-list ${layoutMode === 'grid' ? 'grid-mode' : ''} ${batchMode ? 'batch-active' : ''}" id="libraryList">${renderLibraryRows(cards, notebooks, intervals)}</div>
   <div class="empty-filter hidden" id="libraryEmptyResult"></div>
   <details class="ios-fold-card" data-fold-key="batchImporter" ${uiFolds.batchImporter ? 'open' : ''}>
     <summary class="ios-fold-summary">
@@ -545,15 +658,15 @@ async function renderLibrary(cards, notebooks = [], allCards = cards, allDue = [
       <div class="library-row-main"><div class="library-row-title"><span>${escapeHtml(card.title)}</span></div><div class="library-row-sub">${notebookChipHtml(card.notebook, notebooks)}<span>归档于 ${fmtDate(card.archived_at.slice(0, 10))}</span></div></div>
       <div class="library-due"></div>
       <div class="row-actions">
-        <button class="icon-button" data-restore="${card._id}" aria-label="恢复卡片" title="恢复">${icon('undo')}</button>
-        <button class="icon-button danger" data-delete="${card._id}" aria-label="删除卡片" title="彻底删除">${icon('trash')}</button>
+        <button class="icon-button" data-restore="${escapeHtml(card._id)}" aria-label="恢复卡片" title="恢复">${icon('undo')}</button>
+        <button class="icon-button danger" data-delete="${escapeHtml(card._id)}" aria-label="删除卡片" title="彻底删除">${icon('trash')}</button>
       </div>
     </div>`).join('')}</div></div>
   </details>` : ''}
   ${batchDockHtml}`;
 }
 
-function renderLibraryRows(cards, notebooks = []) {
+function renderLibraryRows(cards, notebooks = [], intervals = INTERVALS) {
   if (!cards.length) return `<div class="empty-state">
     <div class="empty-symbol">${icon('cards', 'icon icon-24')}</div>
     <h3>${activeNotebookFilter ? `《${escapeHtml(activeNotebookFilter)}》笔记本还是空的` : '卡片池是空的'}</h3>
@@ -566,23 +679,23 @@ function renderLibraryRows(cards, notebooks = []) {
     const scoreVal = card.latest_memory_score == null ? -1 : card.latest_memory_score;
     const index = bagIndex(card);
     const plainSnippet = card.outline.replace(/[#*`=]/g, '').replace(/\s+/g, ' ').trim().slice(0, 90);
-    const checkBtn = batchMode ? `<button type="button" class="batch-check ${isSelected ? 'checked' : ''}" data-batch-select="${card._id}" aria-label="选择卡片" aria-pressed="${isSelected}">${isSelected ? icon('check') : ''}</button>` : '';
+    const checkBtn = batchMode ? `<button type="button" class="batch-check ${isSelected ? 'checked' : ''}" data-batch-select="${escapeHtml(card._id)}" aria-label="选择卡片" aria-pressed="${isSelected}">${isSelected ? icon('check') : ''}</button>` : '';
     const nbName = cardNotebook(card);
-    return `<div class="library-row ${isOpen ? 'expanded' : ''} ${isSelected ? 'batch-selected' : ''} ${levelClass(index)}" data-card-row="${card._id}" data-notebook="${escapeHtml(nbName)}" data-bag="${bagFor(card)}" data-score="${scoreVal}" data-due="${card.due_date}" data-created="${escapeHtml(card.created_at || '')}" data-title="${escapeHtml(card.title)}" data-tags="${escapeHtml((card.tags || []).join('|'))}" data-search="${escapeHtml(`${card.title}\n${card.outline}\n${nbName}\n${(card.tags || []).join(' ')}`.toLowerCase())}">
-      <div class="library-row-main" data-toggle-card="${card._id}">
-        <div class="library-row-title">${checkBtn}<button type="button" class="library-title-btn" data-toggle-card="${card._id}" aria-expanded="${isOpen}"><span class="expand-caret ${isOpen ? 'open' : ''}" aria-hidden="true">${icon('chevron-right')}</span>${escapeHtml(card.title)}</button></div>
+    return `<div class="library-row ${isOpen ? 'expanded' : ''} ${isSelected ? 'batch-selected' : ''} ${levelClass(index)}" data-card-row="${escapeHtml(card._id)}" data-notebook="${escapeHtml(nbName)}" data-bag="${bagFor(card)}" data-score="${scoreVal}" data-due="${card.due_date}" data-created="${escapeHtml(card.created_at || '')}" data-title="${escapeHtml(card.title)}" data-tags="${escapeHtml((card.tags || []).join('|'))}" data-search="${escapeHtml(`${card.title}\n${card.outline}\n${nbName}\n${(card.tags || []).join(' ')}`.toLowerCase())}">
+      <div class="library-row-main" data-toggle-card="${escapeHtml(card._id)}">
+        <div class="library-row-title">${checkBtn}<button type="button" class="library-title-btn" data-toggle-card="${escapeHtml(card._id)}" aria-expanded="${isOpen}"><span class="expand-caret ${isOpen ? 'open' : ''}" aria-hidden="true">${icon('chevron-right')}</span>${escapeHtml(card.title)}</button></div>
         <div class="library-card-snippet">${escapeHtml(plainSnippet || '点击展开大纲详情')}</div>
-        <div class="library-row-sub">${notebookChipHtml(nbName, notebooks)}${badgeHtml(card)}${scoreVal >= 0 ? `<span>记忆度 ${scoreVal}%</span>` : ''}<span>周期 ${intervalFor(card)} 天</span>${(card.tags || []).length ? card.tags.slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('') : '<span>无标签</span>'}</div>
+        <div class="library-row-sub">${notebookChipHtml(nbName, notebooks)}${badgeHtml(card)}${scoreVal >= 0 ? `<span>记忆度 ${scoreVal}%</span>` : ''}<span>周期 ${intervalFor(card, intervals)} 天</span>${(card.tags || []).length ? card.tags.slice(0, 3).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('') : '<span>无标签</span>'}</div>
       </div>
       <div class="library-due">${fmtDue(card)}</div>
       <div class="row-actions">
-        <button class="button button-outline small-button" data-review-card="${card._id}" aria-label="复习这张卡片" title="立即复习">${icon('play')}复习</button>
+        <button class="button button-outline small-button" data-review-card="${escapeHtml(card._id)}" aria-label="复习这张卡片" title="立即复习">${icon('play')}复习</button>
         <button class="icon-button" data-more-menu aria-label="更多操作" title="更多" aria-haspopup="true" aria-expanded="false">${icon('more')}</button>
         <div class="row-menu hidden" role="menu">
-          <button type="button" class="row-menu-item" data-edit="${card._id}" role="menuitem">${icon('edit')}编辑卡片</button>
-          <button type="button" class="row-menu-item" data-card-history="${card._id}" role="menuitem">${icon('history')}查看记录</button>
-          <button type="button" class="row-menu-item" data-archive="${card._id}" role="menuitem">${icon('archive')}归档卡片</button>
-          <button type="button" class="row-menu-item danger" data-delete="${card._id}" role="menuitem">${icon('trash')}删除卡片</button>
+          <button type="button" class="row-menu-item" data-edit="${escapeHtml(card._id)}" role="menuitem">${icon('edit')}编辑卡片</button>
+          <button type="button" class="row-menu-item" data-card-history="${escapeHtml(card._id)}" role="menuitem">${icon('history')}查看记录</button>
+          <button type="button" class="row-menu-item" data-archive="${escapeHtml(card._id)}" role="menuitem">${icon('archive')}归档卡片</button>
+          <button type="button" class="row-menu-item danger" data-delete="${escapeHtml(card._id)}" role="menuitem">${icon('trash')}删除卡片</button>
         </div>
       </div>
       <div class="library-outline-drawer ${isOpen ? '' : 'hidden'}" id="drawer-${escapeHtml(card._id)}"><div class="markdown-body">${markdownToHtml(card.outline)}</div></div>
@@ -613,7 +726,11 @@ async function renderHistory(notebooks = [], allCards = [], allDue = []) {
       const tempCard = { ...(card || {}), latest_memory_score: record.memory_score };
       const intervalNote = record.interval_days_before != null && record.interval_days_after != null ? `<span class="cycle-chip">周期 ${record.interval_days_before} 天 → ${record.interval_days_after} 天</span>` : '';
       const durationNote = record.duration_sec ? `<span class="history-dur">用时 ${record.duration_sec} 秒</span>` : '';
-      const draft = record.recall_draft ? `<details class="history-draft" ${record.memory_score < 60 ? 'open' : ''}><summary>查看当时默写草稿</summary><pre>${escapeHtml(record.recall_draft)}</pre></details>` : '';
+      const draftParts = [];
+      if (record.recall_draft) draftParts.push(`<div><strong>首次闭卷回忆</strong><pre>${escapeHtml(record.recall_draft)}</pre></div>`);
+      if (record.recall_after_feedback) draftParts.push(`<div><strong>看过答案后的补充</strong><pre>${escapeHtml(record.recall_after_feedback)}</pre></div>`);
+      if (record.application_attempt) draftParts.push(`<div><strong>应用练习记录</strong><pre>${escapeHtml(record.application_attempt)}</pre></div>`);
+      const draft = draftParts.length ? `<details class="history-draft" ${record.memory_score < 60 ? 'open' : ''}><summary>${record.recall_after_feedback ? '查看回忆与反馈后补充' : '查看首次回忆草稿'}</summary>${draftParts.join('')}</details>` : '';
       return `<div class="history-row ${levelClass(bagIndex(tempCard))}">
         <div class="history-main">
           <div class="history-title-line"><span class="timeline-dot"></span><strong>${escapeHtml(card?.title || '已删除卡片')}</strong>${card ? notebookChipHtml(card.notebook, notebooks) : ''}${intervalNote}</div>
@@ -634,8 +751,8 @@ async function renderHistory(notebooks = [], allCards = [], allDue = []) {
   const body = reviews.length ? `<div class="history-timeline">${groupHtml}</div>` : `<div class="empty-state">
     <div class="empty-symbol">${icon('history', 'icon icon-24')}</div>
     <h3>${filteredCard ? `《${escapeHtml(filteredCard.title)}》还没有复习记录` : '还没有复习记录'}</h3>
-    <p>${filteredCard ? '完成第一次评分后，这里会记录每次回忆的命中率与周期变化。' : '完成第一次评分后，这里会记录每次回忆的命中率与周期变化。'}</p>
-    <div class="empty-actions">${filteredCard ? `<button class="button button-primary" data-review-card="${filteredCard._id}">现在复习这张</button>` : `<button class="button button-primary" data-action="goto-today">开始复习</button>`}</div>
+    <p>完成第一次评分后，这里会记录自评结果、复习周期变化和当时的回忆草稿。</p>
+    <div class="empty-actions">${filteredCard ? `<button class="button button-primary" data-review-card="${escapeHtml(filteredCard._id)}">现在复习这张</button>` : `<button class="button button-primary" data-action="goto-today">开始复习</button>`}</div>
   </div>`;
 
   return `<div class="page-heading">
@@ -652,7 +769,7 @@ async function renderSettings() {
   const currentDaysStr = (saved.interval_days || INTERVALS).join(', ');
   const passThreshold = Number(saved.hold_interval_below_score ?? 40);
   const lowAction = saved.default_low_action || 'hold';
-  const adaptiveLeap = saved.adaptive_leap !== false;
+  const adaptiveLeap = saved.adaptive_leap === true;
   const dailyLimit = Number(saved.daily_review_limit ?? 25);
   const studyMethod = saved.study_method || activeStudyMethod || 'blurting';
   const presets = Object.values(Domain.INTERVAL_PRESETS || {});
@@ -670,7 +787,7 @@ async function renderSettings() {
   <div class="settings-grid">
     <section class="settings-section">
       <h2>${icon('clock')}复习节奏</h2>
-      <p>一键切换契合当前学习阶段的间隔曲线，或自定义递增天数；支持 FSRS 启发的高分加速跃迁。</p>
+      <p>选择复习间隔起点或自定义递增天数；排期是可调整的产品规则，不代表固定的最佳间隔或 FSRS 算法。</p>
       <div class="preset-curve-grid">${presetCardsHtml}</div>
       <details class="ios-fold-section" data-fold-key="customLadder" ${showCustomLadder ? 'open' : ''}>
         <summary class="ios-fold-summary"><span class="fold-title-group"><span class="fold-icon">${icon('sliders')}</span><span>自定义周期阶梯</span></span><span class="fold-chevron">${icon('chevron-right')}</span></summary>
@@ -700,14 +817,14 @@ async function renderSettings() {
       </div>
       <label class="ios-check-row" style="margin-top:var(--sp-3)">
         <input type="checkbox" id="adaptiveLeapCheck" ${adaptiveLeap ? 'checked' : ''} />
-        <span><strong>${icon('zap')}FSRS 高分跳级加速：</strong>评分 ≥ 85%（熟悉）时直接跨越 2 个周期阶梯，避免已熟练卡片过度重复</span>
+        <span><strong>${icon('zap')}高分时跨两档：</strong>评分 ≥ 85 时跨越 2 个周期阶梯，作为可选的排期规则</span>
       </label>
       <div class="settings-actions"><button class="button button-primary" data-action="save-intervals">保存调度设置</button></div>
     </section>
 
     <section class="settings-section">
       <h2>${icon('brain')}每日学习量与方式</h2>
-      <p>结合认知心理学三大主动学习流派，并通过每日复习上限避免中断数日后产生“复习雪崩”焦虑。</p>
+      <p>以主动回忆、核对纠错和分散复习为主；方法提示用于帮助组织答案，不替代独立作答与实际练习。</p>
       <label class="field-label" for="dailyLimitSelect">每日复习上限（防雪崩护盾）</label>
       <select class="select-input" id="dailyLimitSelect" style="width:100%">
         <option value="15" ${dailyLimit === 15 ? 'selected' : ''}>15 张 / 天（轻量无压 · 约 10 分钟）</option>
@@ -717,11 +834,11 @@ async function renderSettings() {
         <option value="0" ${dailyLimit === 0 ? 'selected' : ''}>不设上限（显示全部到期卡片）</option>
       </select>
       <div class="field-note">也可在今日复习页数据带右侧的「上限」chip 就地调整。</div>
-      <label class="field-label" for="defaultStudyMethodSelect">默认主动回忆流派（复习时可随时切换）</label>
+      <label class="field-label" for="defaultStudyMethodSelect">默认回忆提示（复习时可随时切换）</label>
       <select class="select-input" id="defaultStudyMethodSelect" style="width:100%">
-        <option value="blurting" ${studyMethod === 'blurting' ? 'selected' : ''}>空白主动默写法（Blurting）— 闭卷默写提纲与关键词并核对命中率</option>
-        <option value="feynman" ${studyMethod === 'feynman' ? 'selected' : ''}>费曼大白话讲授法（Feynman）— 假装向新手讲清痛点、机制与类比</option>
-        <option value="cornell" ${studyMethod === 'cornell' ? 'selected' : ''}>康奈尔主干线索法（Cornell Cues）— 先看隐去答案的一级提纲线索再还原细节</option>
+        <option value="blurting" ${studyMethod === 'blurting' ? 'selected' : ''}>闭卷主动回忆 — 先独立写出结论、关系、条件与例子</option>
+        <option value="feynman" ${studyMethod === 'feynman' ? 'selected' : ''}>解释机制与举例 — 用自己的话解释原因、条件并举新例子</option>
+        <option value="cornell" ${studyMethod === 'cornell' ? 'selected' : ''}>可选线索回忆 — 卡住时再展开主干线索作为提示</option>
       </select>
       <div class="settings-actions">
         <button class="button button-primary" data-action="save-intervals">保存学习量设定</button>
@@ -929,6 +1046,12 @@ async function beginReview(cards = null) {
   reviewMode = 'due'; randomPool = []; randomDrawCount = 0; finishAfterSave = false;
   reviewQueue = cards || await dueCards(); reviewIndex = 0; if (!reviewQueue.length) return showToast('当前没有到期卡片'); await showReviewCard(); if (!$('#reviewDialog').open) $('#reviewDialog').showModal(); focusReviewStep();
 }
+async function beginMixedReview() {
+  const due = await dueCards(false);
+  const mixed = Domain.interleaveByNotebook(due);
+  if (!mixed.length) return showToast('当前没有到期卡片');
+  await beginReview(mixed);
+}
 async function beginRandomReview(pool = null) {
   const allCards = filterByNotebook(await getCards());
   if (!allCards.length) return showToast(activeNotebookFilter ? `科目「${activeNotebookFilter}」下还没有卡片` : '还没有卡片，请先新增卡片');
@@ -973,12 +1096,10 @@ function updateKeyTermCheck() {
     bar.classList.add('hidden');
     return;
   }
-  const rec = Domain.recommendScoreFromHits(result);
   const hitBadges = result.hits.map(t => `<span class="term-pill hit">${icon('check')} ${escapeHtml(t)}</span>`).join('');
   const missedBadges = result.missed.map(t => `<span class="term-pill missed">${icon('close')} ${escapeHtml(t)}</span>`).join('');
-  const recBtn = rec ? `<button type="button" class="recommend-score-pill" data-recommend-score="${rec.score}" data-recommend-preset="${rec.preset}">${icon('sparkles')}采纳建议分 ${rec.score}%（${rec.label}）</button>` : '';
   const fillBtn = result.missed.length ? `<button type="button" class="text-button" data-action="fill-missed-note">将漏词填入备注</button>` : '';
-  bar.innerHTML = `<div class="keyterm-head"><span>默写关键词自检：命中 <strong>${result.hitCount} / ${result.total}</strong></span><div class="inline-actions">${recBtn}${fillBtn}</div></div><div class="keyterm-pills">${hitBadges}${missedBadges}</div>`;
+  bar.innerHTML = `<div class="keyterm-head"><span>标记词查漏（不作为掌握度评分）：命中 <strong>${result.hitCount} / ${result.total}</strong></span><div class="inline-actions">${fillBtn}</div></div><div class="keyterm-pills">${hitBadges}${missedBadges}</div>`;
   bar.classList.remove('hidden');
 }
 
@@ -1056,7 +1177,7 @@ function insertNoteTemplate(tplKey) {
   if (preview && !preview.classList.contains('hidden')) {
     preview.innerHTML = `<div class="recall-label">大纲预览（点击挖空块可测试显隐）</div><div class="markdown-body">${markdownToHtml(ta.value)}</div>`;
   }
-  showToast('已插入科学笔记大纲模板');
+  showToast('已插入笔记大纲模板');
 }
 
 function applyStudyMethodUI(methodKey, card = reviewQueue[reviewIndex]) {
@@ -1073,13 +1194,13 @@ function applyStudyMethodUI(methodKey, card = reviewQueue[reviewIndex]) {
   if (method.key === 'cornell' && card) {
     const cues = Domain.extractCornellCues(card.outline);
     if (cues.length) {
-      cuesBox.innerHTML = `<div class="cornell-cues-title">${icon('layout-grid')}康奈尔主干线索提示（关键词已隐去，请逐条向下还原细节）：</div><ul class="cornell-cues-list">${cues.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>`;
+      cuesBox.innerHTML = `<details><summary class="cornell-cues-title">${icon('layout-grid')}自由回忆卡住时再展开线索</summary><p class="field-note">线索会降低回忆难度；用它回忆后，记录遗漏并按答案质量自评。</p><ul class="cornell-cues-list">${cues.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul></details>`;
       cuesBox.classList.remove('hidden');
       return;
     }
   }
   if (method.key === 'feynman') {
-    cuesBox.innerHTML = `<div class="cornell-cues-title">${icon('lightbulb')}费曼自测引导：试着用不带行话的大白话讲清楚它的痛点、机制与类比 <button type="button" class="text-button" data-action="fill-feynman-scaffold">插入费曼三问答题卡</button></div>`;
+      cuesBox.innerHTML = `<div class="cornell-cues-title">${icon('lightbulb')}解释与举例：试着说明问题、机制、条件和例子 <button type="button" class="text-button" data-action="fill-feynman-scaffold">插入解释提纲</button></div>`;
     cuesBox.classList.remove('hidden');
     return;
   }
@@ -1104,9 +1225,12 @@ function setReviewStep(step) {
   });
 
   if (answerPanel) answerPanel.classList.toggle('hidden', step < 2);
+  if (recallPanel) recallPanel.classList.toggle('hidden', feedbackRecallMode);
+  $('#reviewAnswerContent')?.classList.toggle('hidden', feedbackRecallMode);
+  $('#feedbackRecallPanel')?.classList.toggle('hidden', !feedbackRecallMode);
   if (scoreSection) scoreSection.classList.toggle('hidden', step < 3);
-  if (recallPanel) recallPanel.classList.toggle('readonly-summary', step === 3);
-  if (recallInput) recallInput.readOnly = step === 3;
+  if (recallPanel) recallPanel.classList.toggle('readonly-summary', step === 3 || (step === 1 && firstRecallDraft != null));
+  if (recallInput) recallInput.readOnly = step !== 1 || firstRecallDraft != null;
 
   const reveal = $('#revealOutline');
   if (reveal) {
@@ -1135,9 +1259,31 @@ function focusReviewStep() {
 }
 
 function goToStepTwo(preselect) {
+  if (firstRecallDraft == null) firstRecallDraft = $('#reviewForm')?.elements?.recall?.value || '';
   if (preselect != null) preselectPending = preselect;
   setReviewStep(2);
   updateKeyTermCheck();
+}
+
+function beginFeedbackRecall() {
+  feedbackRecallMode = true;
+  feedbackRecallDraft = null;
+  const input = $('#feedbackRecallInput');
+  if (input) input.value = '';
+  setReviewStep(2);
+  input?.focus();
+}
+
+function finishFeedbackRecall() {
+  feedbackRecallDraft = $('#feedbackRecallInput')?.value?.trim() || null;
+  feedbackRecallMode = false;
+  setReviewStep(2);
+}
+
+function cancelFeedbackRecall() {
+  feedbackRecallDraft = null;
+  feedbackRecallMode = false;
+  setReviewStep(2);
 }
 
 function goToStepThree() {
@@ -1193,9 +1339,13 @@ async function showReviewCard() {
   const hasCloze = Boolean($('#reviewOutline').querySelector('.cloze-mask'));
   $('#toggleAllCloze')?.classList.toggle('hidden', !hasCloze);
   $('#reviewForm').elements.recall.value = ''; $('#reviewForm').elements.note.value = '';
+  if ($('#applicationAttempt')) $('#applicationAttempt').value = '';
   $('#scoreRange').value = 50; $('#scoreOutput').value = '50%';
-  selectedScore = null; selectedPreset = null; $('#saveReview').disabled = true;
+  selectedScore = null; selectedPreset = null; lowCycleChoice = null; $('#saveReview').disabled = true;
   preselectPending = null;
+  firstRecallDraft = null;
+  feedbackRecallMode = false;
+  feedbackRecallDraft = null;
   const preselectHint = $('#scorePreselectHint');
   if (preselectHint) { preselectHint.textContent = ''; preselectHint.classList.add('hidden'); }
   applyStudyMethodUI(settings?.study_method || activeStudyMethod || 'blurting', fresh);
@@ -1209,7 +1359,7 @@ function drawScoreButtons(settings, card) {
   const intervals = settings?.interval_days || INTERVALS;
   const passThreshold = Number(settings?.hold_interval_below_score ?? 40);
   const defaultLow = settings?.default_low_action || 'hold';
-  const adaptiveLeap = settings?.adaptive_leap !== false;
+  const adaptiveLeap = settings?.adaptive_leap === true;
   const today = localDay();
   const buttons = SCORE_PRESETS.map((score, index) => {
     const mode = score < passThreshold ? defaultLow : 'advance';
@@ -1248,9 +1398,11 @@ async function updateSchedulePreview() {
   const intervals = settings?.interval_days || INTERVALS;
   const passThreshold = Number(settings?.hold_interval_below_score ?? 40);
   const defaultLow = settings?.default_low_action || 'hold';
-  const adaptiveLeap = settings?.adaptive_leap !== false;
+  const adaptiveLeap = settings?.adaptive_leap === true;
   const low = selectedScore < passThreshold;
-  const mode = $('input[name="lowCycle"]:checked')?.value || (low ? defaultLow : 'advance');
+  /* 低分策略是「每张卡」的决策：用户手动选过就沿用，否则回落到全局默认。
+     直接读 radio 的 checked 会把上一张卡的选择带到下一张，必须由显式状态驱动。 */
+  const mode = (low && lowCycleChoice) || (low ? defaultLow : 'advance');
   const schedule = Domain.nextSchedule(card.interval_index, selectedScore, mode, localDay(), intervals, { passThreshold, adaptiveLeap });
   const keepCheckbox = $('input[name="keepRandomDue"]');
   const keepDue = reviewMode === 'random' ? (keepCheckbox ? keepCheckbox.checked : card.due_date > localDay()) : false;
@@ -1278,16 +1430,18 @@ async function saveReview(event) {
   const intervals = settings?.interval_days || INTERVALS;
   const passThreshold = Number(settings?.hold_interval_below_score ?? 40);
   const defaultLow = settings?.default_low_action || 'hold';
-  const adaptiveLeap = settings?.adaptive_leap !== false;
+  const adaptiveLeap = settings?.adaptive_leap === true;
   const reviewedAt = new Date().toISOString();
   const keepDue = reviewMode === 'random' && Boolean($('input[name="keepRandomDue"]')?.checked);
-  const mode = $('input[name="lowCycle"]:checked')?.value || (selectedScore < passThreshold ? defaultLow : 'advance');
+  const isLowScore = selectedScore < passThreshold;
+  const mode = (isLowScore && lowCycleChoice) || (isLowScore ? defaultLow : 'advance');
   const schedule = Domain.nextSchedule(card.interval_index, selectedScore, mode, localDay(new Date(reviewedAt)), intervals, { passThreshold, adaptiveLeap });
   const nextIntervalIndex = keepDue ? card.interval_index : schedule.intervalIndex;
   const nextDays = keepDue ? intervalFor(card, intervals) : schedule.days;
   const nextDueDate = keepDue ? card.due_date : schedule.dueDate;
   const durationSec = cardReviewStartedAt ? Math.max(1, Math.round((Date.now() - cardReviewStartedAt) / 1000)) : null;
-  const review = { _id: `review:${uuid()}`, type: 'review', card_id: card._id, reviewed_at: reviewedAt, memory_score: selectedScore, bag_after: schedule.bag + 1, interval_days_before: intervalFor(card, intervals), interval_days_after: nextDays, next_due_date: nextDueDate, duration_sec: durationSec, recall_draft: $('#reviewForm').elements.recall.value, note: $('#reviewForm').elements.note.value.trim() };
+  const recallValue = $('#reviewForm').elements.recall.value;
+  const review = { _id: `review:${uuid()}`, type: 'review', card_id: card._id, reviewed_at: reviewedAt, memory_score: selectedScore, bag_after: schedule.bag + 1, interval_days_before: intervalFor(card, intervals), interval_days_after: nextDays, next_due_date: nextDueDate, duration_sec: durationSec, recall_draft: firstRecallDraft ?? recallValue, recall_after_feedback: feedbackRecallDraft, note: $('#reviewForm').elements.note.value.trim(), application_attempt: $('#applicationAttempt')?.value.trim() || '' };
   card.latest_memory_score = selectedScore; card.interval_index = nextIntervalIndex; card.due_date = nextDueDate; card.last_reviewed_at = reviewedAt;
   await db.put(card); await db.put(review);
   lastReviewSnapshot = { cardBefore, reviewId: review._id, mode: reviewMode };
@@ -1315,14 +1469,14 @@ async function skipCurrentCard() {
   const settings = await getSetting();
   const intervals = settings?.interval_days || INTERVALS;
   const passThreshold = Number(settings?.hold_interval_below_score ?? 40);
-  const adaptiveLeap = settings?.adaptive_leap !== false;
+  const adaptiveLeap = settings?.adaptive_leap === true;
   const reviewedAt = new Date().toISOString();
   const schedule = Domain.nextSchedule(card.interval_index, 10, 'reset', localDay(new Date(reviewedAt)), intervals, { passThreshold, adaptiveLeap });
   const review = {
     _id: `review:${uuid()}`, type: 'review', card_id: card._id, reviewed_at: reviewedAt, memory_score: 10,
     bag_after: schedule.bag + 1, interval_days_before: intervalFor(card, intervals), interval_days_after: schedule.days,
     next_due_date: schedule.dueDate, duration_sec: cardReviewStartedAt ? Math.max(1, Math.round((Date.now() - cardReviewStartedAt) / 1000)) : null,
-    recall_draft: $('#reviewForm').elements.recall.value, note: '跳过本张，明天再复习'
+    recall_draft: firstRecallDraft ?? $('#reviewForm').elements.recall.value, recall_after_feedback: feedbackRecallDraft, note: '跳过本张，明天再复习'
   };
   card.latest_memory_score = 10; card.interval_index = schedule.intervalIndex; card.due_date = schedule.dueDate; card.last_reviewed_at = reviewedAt;
   await db.put(card); await db.put(review);
@@ -1353,7 +1507,53 @@ async function undoLastReview() {
 async function snoozeDue() { const due = await dueCards(); if (!due.length) return; const answer = await askConfirm('顺延未完成卡片', `将 ${due.length} 张今日到期或逾期卡片顺延到明天？`, '顺延到明天'); if (!answer) return; const tomorrow = addDays(localDay(), 1); for (const card of due) { card.due_date = tomorrow; await db.put(card); } showToast(`${due.length} 张卡片已顺延至明天`); await render(); }
 function askConfirm(title, message, action) { return new Promise(resolve => { const dialog = $('#confirmDialog'); $('#confirmTitle').textContent = title; $('#confirmMessage').textContent = message; $('#confirmAction').textContent = action; dialog.returnValue = ''; dialog.showModal(); dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), { once: true }); }); }
 async function exportData() { const docs = (await allDocs()).map(({ _rev, ...doc }) => { if (doc.type === 'settings') delete doc.couch; return doc; }); const payload = { app: 'StudyStyle', version: 1, exported_at: new Date().toISOString(), docs }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `studystyle-backup-${localDay()}.json`; link.click(); URL.revokeObjectURL(link.href); showToast('JSON 备份已导出'); }
-async function importData(file) { try { const payload = JSON.parse(await file.text()); const docs = Array.isArray(payload) ? payload : payload.docs; if (!Array.isArray(docs)) throw new Error('文件格式无效'); let count = 0; for (const doc of docs) { if (!['card', 'review', 'settings'].includes(doc.type)) continue; const { _rev, ...clean } = doc; const old = await db.get(clean._id).catch(() => null); await db.put({ ...clean, ...(old ? { _rev: old._rev } : {}) }); count++; } showToast(`已导入 ${count} 条数据`); await render(); } catch (error) { showToast(`导入失败：${error.message}`); } }
+async function importData(file) {
+  try {
+    const payload = JSON.parse(await file.text());
+    const docs = Array.isArray(payload) ? payload : payload.docs;
+    if (!Array.isArray(docs)) throw new Error('文件格式无效');
+    /* 逐条校验并修复：缺标题/大纲的卡片直接丢弃，脏分数归零，避免导入后卡片在库中「凭空消失」 */
+    const importDocs = [];
+    let skipped = 0;
+    let repaired = 0;
+    for (const doc of docs) {
+      if (!doc || !['card', 'review', 'settings'].includes(doc.type)) { skipped++; continue; }
+      if (!doc._id) { skipped++; continue; }
+      /* _id 会进入 HTML 属性，限定字符集杜绝属性注入（与服务端校验保持一致） */
+      if (!/^[A-Za-z0-9:._-]{1,128}$/.test(String(doc._id))) { skipped++; continue; }
+      const { _rev, ...clean } = doc;
+      if (clean.type === 'card') {
+        if (typeof clean.title !== 'string' || !clean.title.trim() || typeof clean.outline !== 'string' || !clean.outline.trim()) { skipped++; continue; }
+        clean.title = clean.title.trim();
+        clean.outline = clean.outline.trim();
+        if (clean.latest_memory_score != null) {
+          const score = Number(clean.latest_memory_score);
+          if (!Number.isFinite(score) || score < 0 || score > 100) { clean.latest_memory_score = null; repaired++; }
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(clean.due_date || ''))) clean.due_date = addDays(localDay(), 1);
+      } else if (clean.type === 'review') {
+        if (typeof clean.card_id !== 'string' || !clean.card_id || !Number.isFinite(Date.parse(clean.reviewed_at || ''))) { skipped++; continue; }
+        const score = Number(clean.memory_score);
+        if (!Number.isFinite(score) || score < 0 || score > 100) { clean.memory_score = null; repaired++; }
+        else clean.memory_score = score;
+      }
+      const old = await db.get(clean._id).catch(() => null);
+      importDocs.push({ ...clean, ...(old ? { _rev: old._rev } : {}) });
+    }
+    if (importDocs.length) {
+      const results = await db.bulkDocs(importDocs);
+      const failure = Array.isArray(results) && results.find(result => result?.error);
+      if (failure) throw new Error(failure.message || '部分数据写入失败');
+    }
+    const count = importDocs.length;
+    flushServerStore();
+    const notes = [`已导入 ${count} 条数据`];
+    if (skipped) notes.push(`跳过 ${skipped} 条无效记录`);
+    if (repaired) notes.push(`修复 ${repaired} 条异常分数`);
+    showToast(notes.join('，'));
+    await render();
+  } catch (error) { showToast(`导入失败：${error.message}`); }
+}
 
 function couchInput() { const url = $('#couchUrl').value.trim().replace(/\/$/, ''); const name = $('#couchDb').value.trim(); const user = $('#couchUser').value.trim(); const password = $('#couchPass').value; if (!url.startsWith('https://')) throw new Error('服务地址必须使用 HTTPS'); const parsed = new URL(url); if (parsed.username || parsed.password) throw new Error('请勿把账号或密码写进服务地址'); if (!name || !user || !password) throw new Error('请填写数据库名、用户名和密码'); return { url, name, user, password }; }
 async function connectCouch(testOnly = false) { const status = $('#couchStatus'); try { await ensurePouchDB(); if (!pouchMode) { const pouch = new window.PouchDB('studystyle'); const fallbackDocs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]'); for (const { _rev, ...doc } of fallbackDocs) { const existing = await pouch.get(doc._id).catch(() => null); if (!existing) await pouch.put(doc); } db = pouch; pouchMode = true; } const info = couchInput(); const remote = new PouchDB(`${info.url}/${encodeURIComponent(info.name)}`, { auth: { username: info.user, password: info.password }, skip_setup: true }); status.className = 'status-box'; status.textContent = '正在验证数据库连接与读写权限…'; await remote.info(); const probe = `studystyle:probe:${uuid()}`; const inserted = await remote.put({ _id: probe, type: 'probe', at: new Date().toISOString() }); await remote.remove({ _id: probe, _rev: inserted.rev }); const settings = await getSetting(); await saveSetting({ ...settings, couch: { url: info.url, name: info.name, user: info.user } }); if (testOnly) { status.className = 'status-box success'; status.textContent = '连接成功，数据库读写权限正常。尚未开始同步。'; return; } if (syncHandler) syncHandler.cancel(); syncHandler = db.sync(remote, { live: true, retry: true }).on('change', async () => { await render(); }).on('paused', () => { status.className = 'status-box success'; status.textContent = '已同步，正在监听变更。'; $('#syncDot').classList.add('connected'); $('#syncLabel').textContent = 'CouchDB 已同步'; }).on('active', () => { status.className = 'status-box'; status.textContent = '同步中…'; }).on('denied', error => { status.className = 'status-box error'; status.textContent = `权限不足：${error.message}`; }).on('error', error => { status.className = 'status-box error'; status.textContent = `同步错误：${error.message}`; }); status.className = 'status-box success'; status.textContent = '连接成功，首次双向同步已启动。首次同步期间请保持此页面打开。'; await render(); } catch (error) { status.className = 'status-box error'; status.textContent = error.message || '连接失败，请检查地址、认证、CORS 和数据库权限。'; } }
@@ -1384,11 +1584,13 @@ function toggleLimitPopover() {
 document.addEventListener('click', async event => {
   try {
     const target = event.target instanceof Element ? event.target : event.target.parentElement; if (!target) return;
-    const cloze = target.closest('.cloze-mask'); if (cloze) { cloze.classList.toggle('revealed'); return; }
+    const actionMenuItem = target.closest('.action-menu-item');
+    if (actionMenuItem) actionMenuItem.closest('details')?.removeAttribute('open');
+    const cloze = target.closest('.cloze-mask'); if (cloze) { const revealed = cloze.classList.toggle('revealed'); cloze.setAttribute('aria-expanded', String(revealed)); return; }
     /* 上限 popover：点外部即关闭 */
     const openPopover = $('.limit-popover');
     if (openPopover && !target.closest('.limit-popover') && !target.closest('[data-action="open-limit"]')) openPopover.remove();
-    if (target.closest('#toggleAllCloze')) { const masks = $$('#reviewOutline .cloze-mask'); const anyHidden = masks.some(m => !m.classList.contains('revealed')); masks.forEach(m => m.classList.toggle('revealed', anyHidden)); return; }
+    if (target.closest('#toggleAllCloze')) { const masks = $$('#reviewOutline .cloze-mask'); const anyHidden = masks.some(m => !m.classList.contains('revealed')); masks.forEach(m => { m.classList.toggle('revealed', anyHidden); m.setAttribute('aria-expanded', String(anyHidden)); }); return; }
     const mdWrap = target.closest('[data-md-wrap]'); if (mdWrap) { insertMarkdownFormat(mdWrap.dataset.mdWrap); return; }
     const noteTpl = target.closest('[data-note-template]'); if (noteTpl) { insertNoteTemplate(noteTpl.dataset.noteTemplate); return; }
     const methodBtn = target.closest('[data-study-method]'); if (methodBtn) {
@@ -1479,7 +1681,6 @@ document.addEventListener('click', async event => {
     const quickTag = target.closest('[data-quick-tag]'); if (quickTag) { const t = quickTag.dataset.quickTag; const input = $('#cardTags'); const current = input.value.split(',').map(s => s.trim()).filter(Boolean); if (current.includes(t)) input.value = current.filter(x => x !== t).join(', '); else input.value = [...current, t].join(', '); return; }
     if (target.closest('#toggleOutlinePreview')) { const preview = $('#cardOutlinePreview'); const btn = $('#toggleOutlinePreview'); const hidden = preview.classList.toggle('hidden'); if (!hidden) preview.innerHTML = `<div class="recall-label">大纲预览（点击挖空块可测试显隐）</div><div class="markdown-body">${markdownToHtml($('#cardOutline').value)}</div>`; btn.textContent = hidden ? '预览效果' : '收起预览'; return; }
     if (target.closest('#editInReviewButton')) { const cur = reviewQueue[reviewIndex]; if (cur) await openCardDialog(await db.get(cur._id)); return; }
-    const recPill = target.closest('[data-recommend-score]'); if (recPill) { selectScore(Number(recPill.dataset.recommendScore), Number(recPill.dataset.recommendPreset)); return; }
     const batchChk = target.closest('[data-batch-select]'); if (batchChk) { const id = batchChk.dataset.batchSelect; if (selectedCardIds.has(id)) selectedCardIds.delete(id); else selectedCardIds.add(id); await render(); filterLibrary(); return; }
     const add = target.closest('#addCardButton,[data-action="add"]'); if (add) { await openCardDialog(); return; }
     const randomBtn = target.closest('#randomCardButton,[data-action="random-draw"],[data-action="random-draw-library"]'); if (randomBtn) { await beginRandomReview(); return; }
@@ -1491,6 +1692,9 @@ document.addEventListener('click', async event => {
     if (target.closest('#revealOutline')) { goToStepTwo(null); return; }
     if (target.closest('#cantRecall')) { goToStepTwo(10); return; }
     if (target.closest('#backToRecall')) { setReviewStep(1); return; }
+    if (target.closest('#startFeedbackRecall')) { beginFeedbackRecall(); return; }
+    if (target.closest('#finishFeedbackRecall')) { finishFeedbackRecall(); return; }
+    if (target.closest('#cancelFeedbackRecall')) { cancelFeedbackRecall(); return; }
     if (target.closest('#goToScore')) { goToStepThree(); return; }
     if (target.closest('#skipCard')) { await skipCurrentCard(); return; }
     if (target.closest('#clearRecall')) { $('#reviewForm').elements.recall.value = ''; updateKeyTermCheck(); return; }
@@ -1567,7 +1771,7 @@ document.addEventListener('click', async event => {
     if (action === 'fill-feynman-scaffold') {
       const recallEl = $('#reviewForm')?.elements?.recall;
       if (recallEl) {
-        recallEl.value = `1. 核心痛点（它解决什么问题？）：\n2. 运转机制（用大白话解释）：\n3. 生活类比 / 现实例子：`;
+        recallEl.value = `1. 它解决什么问题？\n2. 关键机制、条件和因果关系是什么？\n3. 举一个新例子或反例：`;
         recallEl.focus();
       }
       return;
@@ -1588,10 +1792,11 @@ document.addEventListener('click', async event => {
     if (action === 'clear-filters') { libraryFilter = { ...libraryFilter, query: '', tag: 'all', status: 'all', sort: 'due' }; activeBagFilter = null; await render(); return; }
     if (action === 'clear-history-filter') { activeHistoryCardFilter = null; await render(); }
     if (action === 'start-today') {
+      const list = await dueCards().then(l => activeBagFilter == null ? l : l.filter(card => bagFor(card) === activeBagFilter));
+      /* 队列完整参与复习（计划 §4.2 不丢失原则）；每日上限改为「先做前 N 张」的软建议，不再截断 */
       const settings = (await getSetting()) || {};
       const dailyLimit = Number(settings.daily_review_limit ?? 25);
-      const list = await dueCards().then(l => activeBagFilter == null ? l : l.filter(card => bagFor(card) === activeBagFilter));
-      await beginReview(dailyLimit > 0 ? list.slice(0, dailyLimit) : list);
+      await beginReview(dailyLimit > 0 && list.length > dailyLimit ? list.slice(0, dailyLimit) : list);
       return;
     }
     if (action === 'start-today-all') {
@@ -1599,6 +1804,7 @@ document.addEventListener('click', async event => {
       await beginReview(list);
       return;
     }
+    if (action === 'start-mixed') { await beginMixedReview(); return; }
     if (action === 'snooze') await snoozeDue();
     if (action === 'export') await exportData();
     if (action === 'import') $('#importFile').click();
@@ -1613,7 +1819,7 @@ document.addEventListener('click', async event => {
       if (!valid) { showToast('周期需从 1 天开始，之后使用严格递增的 1–365 天整数'); return; }
       const passThreshold = Number($('#passThresholdSelect')?.value ?? 40);
       const defaultLowAction = $('#lowActionSelect')?.value || 'hold';
-      const adaptiveLeap = $('#adaptiveLeapCheck') ? Boolean($('#adaptiveLeapCheck').checked) : true;
+      const adaptiveLeap = $('#adaptiveLeapCheck') ? Boolean($('#adaptiveLeapCheck').checked) : false;
       const dailyLimit = Number($('#dailyLimitSelect')?.value ?? 25);
       const studyMethod = $('#defaultStudyMethodSelect')?.value || 'blurting';
       activeStudyMethod = studyMethod;
@@ -1644,7 +1850,11 @@ $('#notebookForm')?.addEventListener('submit', saveNotebookFromDialog);
 $('#reviewForm').addEventListener('submit', saveReview);
 $('#reviewForm').addEventListener('input', event => { if (event.target.name === 'recall' && reviewStep >= 2) updateKeyTermCheck(); });
 $('#scoreRange').addEventListener('input', event => selectScore(Number(event.target.value), null));
-$('#reviewDialog').addEventListener('change', event => { if (event.target.name === 'lowCycle' || event.target.name === 'keepRandomDue') updateSchedulePreview(); });
+$('#reviewDialog').addEventListener('change', event => {
+  /* 用户手动选择低分策略后写入显式状态，避免沿用上一张卡的选择 */
+  if (event.target.name === 'lowCycle') { lowCycleChoice = event.target.value; updateSchedulePreview(); return; }
+  if (event.target.name === 'keepRandomDue') updateSchedulePreview();
+});
 $('#reviewDialog').addEventListener('close', () => { clearInterval(reviewTimerInterval); if (pendingDayRefresh) { pendingDayRefresh = false; render(); } });
 $('#viewRoot').addEventListener('toggle', event => { const key = event.target?.dataset?.foldKey; if (key) uiFolds[key] = Boolean(event.target.open); }, true);
 $('#viewRoot').addEventListener('input', event => { if (['cardSearch', 'tagFilter', 'statusFilter', 'sortFilter'].includes(event.target.id)) filterLibrary(); });
@@ -1692,6 +1902,12 @@ function filterLibrary() {
   const counter = $('#libraryResultCount');
   if (counter) counter.textContent = `${visible} 张`;
   const hasFilter = Boolean(query) || bag !== 'all' || tag !== 'all' || status !== 'all' || sort !== 'due';
+  const drawerFilterCount = (tag !== 'all' ? 1 : 0) + (status !== 'all' ? 1 : 0) + (sort !== 'due' ? 1 : 0);
+  const filterPill = $('#libraryFilterCountPill');
+  if (filterPill) {
+    filterPill.textContent = drawerFilterCount ? String(drawerFilterCount) : '';
+    filterPill.classList.toggle('hidden', !drawerFilterCount);
+  }
   const clearBtn = $('#libraryClearFilters');
   if (clearBtn) clearBtn.classList.toggle('hidden', !hasFilter);
   const emptyEl = $('#libraryEmptyResult');
@@ -1704,7 +1920,7 @@ function filterLibrary() {
       if (tag !== 'all') parts.push(`标签：${tag}`);
       if (status !== 'all') parts.push(status === 'due' ? '日期：今日到期' : '日期：未到期');
       if (query) parts.push(`关键词：${query}`);
-      emptyEl.innerHTML = `没有符合条件的卡片。清除筛选（${parts.join(' · ')}）后可看到全部 <strong>${rows.length}</strong> 张。`;
+      emptyEl.innerHTML = `没有符合条件的卡片。清除筛选（${parts.map(escapeHtml).join(' · ')}）后可看到全部 <strong>${rows.length}</strong> 张。`;
     }
   }
   if (listEl && rows.length > 1) {
@@ -1756,7 +1972,13 @@ document.addEventListener('keydown', async event => {
   if (dialog.open) {
     /* 裸 Enter 不提交（只保留 Ctrl/⌘+Enter），避免与按钮激活双触发 */
     if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && event.target.tagName !== 'BUTTON') { event.preventDefault(); return; }
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !$('#saveReview').disabled) { event.preventDefault(); $('#reviewForm').requestSubmit(); return; }
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (reviewStep === 1) { goToStepTwo(null); return; }
+      if (reviewStep === 2) { goToStepThree(); return; }
+      if (!$('#saveReview').disabled) { $('#reviewForm').requestSubmit(); }
+      return;
+    }
     if (typing) return;
 
     if (event.code === 'Space') {
@@ -1872,7 +2094,7 @@ async function seedDemoCards() {
       latest_memory_score: null
     },
     {
-      title: '艾宾浩斯复习法与主动回忆原则',
+      title: '间隔复习与主动回忆',
       outline: '- 核心理念：**先回忆（Active Recall）**，再看答案核对\n- 6 级记忆梯度：待首次复习 / 待加强 / 较弱 / 一般 / 较好 / 熟悉\n- 低于 ==40%== 时默认保持当前复习周期，避免盲目拉长间隔',
       notebook: '学习方法',
       tags: ['学习方法', '示例卡片'],
@@ -1910,5 +2132,8 @@ async function seedDemoCards() {
 
 /* 兜底：自定义阶梯折叠时仍能保存当前曲线 */
 window.addEventListener('storage', event => { if (event.key === LOCAL_KEY && !pouchMode) render(); });
+/* 页面隐藏/关闭前立即冲刷待推送数据，避免防抖窗口内关页导致本次改动未同步 */
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushServerStore(); });
+window.addEventListener('beforeunload', () => flushServerStore());
 setInterval(() => { const currentDay = localDay(); if (currentDay === observedDay) return; observedDay = currentDay; if ($('#reviewDialog').open) pendingDayRefresh = true; else render(); }, 60000);
 initStore().catch(error => { console.error(error); $('#viewRoot').innerHTML = `<div class="empty-state"><div class="empty-symbol">${icon('warning', 'icon icon-24')}</div><h3>应用启动失败</h3><p>${escapeHtml(error.message || '未知错误')}</p><div class="empty-actions"><button class="button button-primary" data-action="reload">重新加载</button></div></div>`; });

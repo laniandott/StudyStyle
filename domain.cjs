@@ -6,8 +6,8 @@
   const DEFAULT_INTERVALS = [1, 3, 7, 14, 30, 60];
 
   const INTERVAL_PRESETS = {
-    ebbinghaus: { key: 'ebbinghaus', name: '经典艾宾浩斯', days: [1, 2, 4, 7, 15, 30], desc: '前密后疏（1/2/4/7/15/30天），适合短期密集攻克新概念' },
-    balanced: { key: 'balanced', name: '均衡长效记忆', days: [1, 3, 7, 14, 30, 60], desc: '经典稳健节奏（1/3/7/14/30/60天），兼顾日常负担与长期留存' },
+    ebbinghaus: { key: 'ebbinghaus', name: '短期强化', days: [1, 2, 4, 7, 15, 30], desc: '较密集的前期安排（1/2/4/7/15/30天），适合短期集中复习；按实际表现调整' },
+    balanced: { key: 'balanced', name: '均衡长周期', days: [1, 3, 7, 14, 30, 60], desc: '中长间隔起点（1/3/7/14/30/60天），根据答案表现和目标保持时长调整' },
     cram: { key: 'cram', name: '考前高频冲刺', days: [1, 2, 3, 5, 8, 14], desc: '压缩长周期（最高14天），适合考前 1–2 周高频滚动突击' },
     deep: { key: 'deep', name: '长线深度掌握', days: [1, 4, 10, 25, 60, 120], desc: '大跨度递进（最高120天），适合已理解透彻的底层原理与框架' }
   };
@@ -15,21 +15,21 @@
   const STUDY_METHODS = {
     blurting: {
       key: 'blurting',
-      name: '空白主动默写 (Blurting)',
-      badge: '空白默写',
-      prompt: '闭卷在下方快速默写你能想起的大纲主干、关键词与推导细节，写完后展开大纲比对命中率…'
+      name: '闭卷主动回忆',
+      badge: '主动回忆',
+      prompt: '先不看大纲或提示，写下核心结论、关键关系、条件与一个例子。尽量用完整答案说明思路，再展开大纲核对。'
     },
     feynman: {
       key: 'feynman',
-      name: '费曼讲授法 (Feynman)',
-      badge: '费曼讲授',
-      prompt: '假装向零基础新手解释这个概念：\n1. 它到底解决什么核心问题？\n2. 它的底层运转逻辑是什么（拒绝死记术语）？\n3. 举一个生活类比或反例：'
+      name: '解释机制与举例',
+      badge: '机制解释',
+      prompt: '合上材料，用自己的话说明：\n1. 这个概念解决什么问题？\n2. 关键机制、条件和因果关系是什么？\n3. 举一个新例子或反例，说明它何时适用。'
     },
     cornell: {
       key: 'cornell',
-      name: '康奈尔线索法 (Cornell Cues)',
-      badge: '康奈尔线索',
-      prompt: '参考上方提取的「康奈尔主干线索与提问」，逐条向下还原隐去的关键细节与空缺内容…'
+      name: '可选线索回忆',
+      badge: '线索回忆',
+      prompt: '如果自由回忆卡住，可展开少量主干线索，再合上材料逐条回忆关键细节；记录哪些线索仍想不起答案。'
     }
   };
 
@@ -44,6 +44,46 @@
     const value = Number(score);
     if (!Number.isFinite(value) || value < 0 || value > 100) throw new RangeError('Memory score must be between 0 and 100');
     return Math.min(4, Math.floor(value / 20));
+  }
+
+  /* 宽容版：用于读取历史数据。脏分数（越界/NaN/字符串）不应让整个页面崩溃，
+     而是归入「待首次复习」并由调用方决定是否提示用户修复。 */
+  function scoreToBagSafe(score) {
+    if (score == null) return -1;
+    const value = Number(score);
+    if (!Number.isFinite(value) || value < 0 || value > 100) return -1;
+    return Math.min(4, Math.floor(value / 20));
+  }
+
+  function pickNewerDoc(localDoc, remoteDoc) {
+    if (!localDoc) return remoteDoc;
+    if (!remoteDoc) return localDoc;
+    if (localDoc._deleted) return localDoc;
+    if (remoteDoc._deleted) return remoteDoc;
+
+    const localTime = typeof localDoc.updated_at === 'string' ? localDoc.updated_at : '';
+    const remoteTime = typeof remoteDoc.updated_at === 'string' ? remoteDoc.updated_at : '';
+    if (!localTime && !remoteTime) return localDoc;
+    if (!localTime) return remoteDoc;
+    if (!remoteTime) return localDoc;
+    return localTime > remoteTime ? localDoc : remoteDoc;
+  }
+
+  function reconcileDocSets(localDocs = [], remoteDocs = []) {
+    const merged = new Map();
+    for (const doc of localDocs) if (doc?._id) merged.set(doc._id, doc);
+    let needsPush = false;
+    for (const doc of remoteDocs) {
+      if (!doc?._id) continue;
+      const local = merged.get(doc._id);
+      if (!local) { merged.set(doc._id, doc); continue; }
+      const winner = pickNewerDoc(local, doc);
+      merged.set(doc._id, winner);
+      if (winner === local && JSON.stringify(local) !== JSON.stringify(doc)) needsPush = true;
+    }
+    const docs = [...merged.values()];
+    if (docs.length !== remoteDocs.length) needsPush = true;
+    return { docs, needsPush };
   }
 
   function intervalDays(index, intervals = DEFAULT_INTERVALS) {
@@ -77,10 +117,31 @@
 
   function sortDueCards(cards) {
     return [...cards].sort((a, b) => {
-      const aBag = scoreToBag(a.latest_memory_score);
-      const bBag = scoreToBag(b.latest_memory_score);
+      /* 用宽容版取袋：脏分数不应让整个队列排序抛错导致整页白屏 */
+      const aBag = scoreToBagSafe(a.latest_memory_score);
+      const bBag = scoreToBagSafe(b.latest_memory_score);
       return aBag - bBag || a.due_date.localeCompare(b.due_date) || a.created_at.localeCompare(b.created_at);
     });
+  }
+
+  // 按笔记本轮换，保留每个笔记本内部原有的优先级。
+  // 这只是队列组织策略，不改变卡片的到期日或评分。
+  function interleaveByNotebook(cards, notebookOf = card => normalizeNotebook(card?.notebook)) {
+    const groups = new Map();
+    for (const card of cards || []) {
+      const key = notebookOf(card);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(card);
+    }
+    const result = [];
+    let remaining = true;
+    while (remaining) {
+      remaining = false;
+      for (const group of groups.values()) {
+        if (group.length) { result.push(group.shift()); remaining = true; }
+      }
+    }
+    return result;
   }
 
   function pickRandomCard(cards, excludeId = null, rng = Math.random, weighted = true) {
@@ -142,16 +203,6 @@
       return { day, count: (reviewDayStrings || []).filter(d => d === day).length };
     });
     return { currentStreak, activeToday, last14Days };
-  }
-
-  function recommendScoreFromHits(hitResult) {
-    if (!hitResult || !hitResult.total) return null;
-    const ratio = hitResult.hitCount / hitResult.total;
-    if (ratio >= 0.9) return { score: 90, preset: 4, label: '熟悉' };
-    if (ratio >= 0.7) return { score: 70, preset: 3, label: '较好' };
-    if (ratio >= 0.45) return { score: 50, preset: 2, label: '一般' };
-    if (ratio >= 0.2) return { score: 30, preset: 1, label: '较弱' };
-    return { score: 10, preset: 0, label: '待加强' };
   }
 
   function parseBatchMarkdownCards(rawText, defaultTags = [], defaultNotebook = DEFAULT_NOTEBOOK) {
@@ -258,15 +309,18 @@
     normalizeNotebook,
     collectNotebooks,
     scoreToBag,
+    scoreToBagSafe,
+    pickNewerDoc,
+    reconcileDocSets,
     intervalDays,
     addLocalDays,
     nextSchedule,
     sortDueCards,
+    interleaveByNotebook,
     pickRandomCard,
     extractKeyTerms,
     checkKeyTermHits,
     computeStreak,
-    recommendScoreFromHits,
     parseBatchMarkdownCards,
     extractCornellCues,
     balanceOverdueCards

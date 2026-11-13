@@ -7,8 +7,17 @@ const vm = require('node:vm');
 test('app.js initializes, renders all views, and completes full card & review lifecycle without error', async () => {
   const root = path.resolve(__dirname, '..');
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
   const domainCode = fs.readFileSync(path.join(root, 'domain.cjs'), 'utf8');
   const appCode = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+
+  assert.match(html, /<details class="top-tools-menu action-menu">/);
+  assert.match(html, /id="themeToggleButton"/);
+  assert.match(html, /id="helpDialogButton"/);
+  assert.match(html, /id="settingsButton"/);
+  assert.match(html, /<details class="top-tools-menu action-menu">[\s\S]*<button class="action-menu-item" id="settingsButton"[^>]*data-view="settings"/);
+  assert.match(styles, /\.top-tools-menu \.action-menu-panel\s*\{\s*left:\s*auto;\s*right:\s*0;/);
+  assert.match(styles, /\.top-tools-menu \.action-menu-panel\s*\{\s*position:\s*fixed;\s*top:[^}]+left:\s*auto;\s*right:\s*var\(--sp-3\);/);
 
   class MockClassList {
     constructor() { this.set = new Set(); }
@@ -140,6 +149,7 @@ test('app.js initializes, renders all views, and completes full card & review li
     await saveReview({ preventDefault() {} });
     view = 'library';
     await render();
+    assert.ok($('#viewRoot').innerHTML.includes('library-more-menu'));
     assert.ok($('#viewRoot').innerHTML.includes('view-mode-switch'));
     assert.ok($('#viewRoot').innerHTML.includes('libraryFilterDrawer'));
     assert.ok(markdownToHtml('==重点==').includes('cloze-mask'));
@@ -157,6 +167,9 @@ test('app.js initializes, renders all views, and completes full card & review li
     view = 'today';
     await render();
     assert.ok($('#viewRoot').innerHTML.includes('today-head'));
+    assert.ok($('#viewRoot').innerHTML.includes('today-more-menu'));
+    assert.ok($('#viewRoot').innerHTML.includes('data-action="start-today"'));
+    assert.ok($('#viewRoot').innerHTML.includes('data-action="start-mixed"'));
     assert.ok($('#viewRoot').innerHTML.includes('progress-ring'));
     assert.ok($('#viewRoot').innerHTML.includes('mastery-stack'));
     assert.ok($('#viewRoot').innerHTML.includes('ios-fold-card'));
@@ -165,7 +178,21 @@ test('app.js initializes, renders all views, and completes full card & review li
     $('#reviewForm').elements.recall.value = '类囊体薄膜 ATP';
     updateKeyTermCheck();
     assert.ok($('#keyTermCheckBar').innerHTML.includes('命中'));
-    assert.ok($('#keyTermCheckBar').innerHTML.includes('recommend-score-pill'));
+    assert.ok($('#keyTermCheckBar').innerHTML.includes('不作为掌握度评分'));
+    assert.ok(!$('#keyTermCheckBar').innerHTML.includes('data-recommend-score'));
+    goToStepTwo(null);
+    assert.equal($('#recallInput').readOnly, true);
+    beginFeedbackRecall();
+    assert.ok($('#recallPanel').classList.contains('hidden'));
+    assert.ok($('#reviewAnswerContent').classList.contains('hidden'));
+    $('#feedbackRecallInput').value = '看过答案后的补充';
+    finishFeedbackRecall();
+    assert.ok(!$('#reviewAnswerContent').classList.contains('hidden'));
+    await goToStepThree();
+    await selectScore(70, 3);
+    await saveReview({ preventDefault() {} });
+    const feedbackReview = (await getReviews()).find(row => row.recall_draft === '类囊体薄膜 ATP');
+    assert.equal(feedbackReview.recall_after_feedback, '看过答案后的补充');
     view = 'library';
     batchMode = true;
     await render();
@@ -180,9 +207,10 @@ test('app.js initializes, renders all views, and completes full card & review li
     insertNoteTemplate('cornell');
     assert.ok($('#cardOutline').value.includes('核心问题 / 线索'));
     applyStudyMethodUI('cornell', { outline: '- 核心阶段：==类囊体== 场所' });
+    assert.ok($('#cornellCuesBox').innerHTML.includes('<details>'));
     assert.ok($('#cornellCuesBox').innerHTML.includes('[ ___ ]'));
     applyStudyMethodUI('feynman', { outline: '- 核心阶段' });
-    assert.ok($('#cornellCuesBox').innerHTML.includes('费曼自测引导'));
+    assert.ok($('#cornellCuesBox').innerHTML.includes('解释与举例'));
     view = 'settings';
     await render();
     assert.ok($('#viewRoot').innerHTML.includes('preset-curve-card'));

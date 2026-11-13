@@ -49,6 +49,8 @@
   --c-warning: #9A6410;
   --c-warning-bg: #FBF2E2;
   --c-danger: #C0392B;
+  --c-danger-hover: #A82F23;
+  --c-danger-on: #FFFFFF;
   --c-danger-bg: #FBEBE9;
   --c-info: #3A26B0;
   --c-info-bg: #EEF0FC;
@@ -115,6 +117,21 @@
   --content-max: 1200px;
   --reading-max: 760px;
   --dialog-w: min(720px, calc(100vw - 32px));
+
+  /* ---- iOS 透明液态玻璃质感（Liquid Glass） ---- */
+  --glass-bg: rgba(255, 255, 255, 0.36);
+  --glass-bg-elevated: rgba(255, 255, 255, 0.56);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.22);
+  --glass-border: rgba(255, 255, 255, 0.82);
+  --glass-highlight: inset 0 1.5px 1px rgba(255, 255, 255, 0.92), inset 0 -1px 1px rgba(255, 255, 255, 0.28);
+  --glass-blur: blur(10px) saturate(165%);
+  --glass-shadow: 0 10px 30px rgba(70, 48, 207, 0.08), 0 2px 8px rgba(16, 24, 40, 0.05);
+  --ambient-bg:
+    radial-gradient(880px 580px at 10% -4%, rgba(99, 102, 241, 0.26), transparent 58%),
+    radial-gradient(780px 560px at 92% 10%, rgba(56, 189, 248, 0.24), transparent 56%),
+    radial-gradient(760px 540px at 72% 94%, rgba(192, 132, 252, 0.22), transparent 58%),
+    radial-gradient(600px 460px at 22% 78%, rgba(52, 211, 153, 0.14), transparent 55%),
+    linear-gradient(155deg, #EEF2FF 0%, #E7EEFA 48%, #F3EFFE 100%);
 }
 
 [data-theme="dark"] {
@@ -141,6 +158,9 @@
   --c-warning: #F0B85C;
   --c-warning-bg: #332914;
   --c-danger: #F0867C;
+  --c-danger-hover: #E06A5E;
+  /* 深色模式 danger 底色偏亮，白字对比度仅 2.5:1，改用深色字提升至 7.9:1 */
+  --c-danger-on: #1B0F4D;
   --c-danger-bg: #37191A;
   --c-info: #9DA4F3;
   --c-info-bg: #222338;
@@ -175,6 +195,20 @@
   --score-3: #B0B1EC;
   --score-4: #C2C2F2;
   --score-5: #D3D2F7;
+
+  /* ---- iOS 透明液态玻璃质感（深色模式） ---- */
+  --glass-bg: rgba(24, 28, 44, 0.34);
+  --glass-bg-elevated: rgba(28, 33, 52, 0.54);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.04);
+  --glass-border: rgba(255, 255, 255, 0.22);
+  --glass-highlight: inset 0 1px 1px rgba(255, 255, 255, 0.22), inset 0 -1px 1px rgba(255, 255, 255, 0.05);
+  --glass-blur: blur(11px) saturate(170%);
+  --glass-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  --ambient-bg:
+    radial-gradient(880px 580px at 12% -4%, rgba(79, 70, 229, 0.36), transparent 58%),
+    radial-gradient(780px 560px at 90% 10%, rgba(14, 165, 233, 0.24), transparent 56%),
+    radial-gradient(760px 540px at 76% 94%, rgba(139, 92, 246, 0.26), transparent 58%),
+    linear-gradient(155deg, #090B12 0%, #0F1424 52%, #0C0E18 100%);
 }
 
 /* ===================== 基础 ===================== */
@@ -482,14 +516,19 @@ a {
 
 .bag-link {
   position: relative;
+  width: 100%;
   height: 32px;
   display: flex;
   align-items: center;
   padding: 0 var(--sp-3);
   gap: var(--sp-2);
+  border: 0;
+  background: transparent;
   color: var(--c-text-2);
+  font: inherit;
   font-size: 13px;
   line-height: 20px;
+  text-align: left;
   border-radius: var(--r-md);
   cursor: pointer;
   transition: background 0.16s ease, color 0.16s ease;
@@ -598,6 +637,10 @@ a {
   gap: var(--sp-2);
 }
 
+.top-tools-menu[open] {
+  z-index: 5;
+}
+
 .top-sep {
   width: 1px;
   height: 20px;
@@ -701,13 +744,13 @@ a {
 
 .button-danger {
   background: var(--c-danger);
-  color: #fff;
+  color: var(--c-danger-on);
   border-color: var(--c-danger);
 }
 
 .button-danger:hover:not(:disabled) {
-  background: #A82F23;
-  border-color: #A82F23;
+  background: var(--c-danger-hover);
+  border-color: var(--c-danger-hover);
 }
 
 .button-danger:focus-visible {
@@ -1046,7 +1089,7 @@ kbd {
   height: 28px;
   padding: 0 var(--sp-3);
   border: 1px solid var(--c-border);
-  border-radius: var(--r-full);
+  border-radius: var(--r-md);
   background: var(--c-surface);
   color: var(--c-text-2);
   font: inherit;
@@ -1841,9 +1884,12 @@ details[open] > .ios-fold-summary .fold-chevron {
   align-items: center;
   padding: var(--sp-4);
   border-bottom: 1px solid var(--c-border);
-  border-left: 3px solid var(--row-accent, transparent);
   background: var(--c-surface);
   transition: background 0.15s ease;
+}
+
+.library-list.batch-active .row-actions {
+  display: none;
 }
 
 .library-title-btn {
@@ -1910,6 +1956,7 @@ details[open] > .ios-fold-summary .fold-chevron {
   line-height: 16px;
   color: var(--c-text-3);
   margin-top: 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 .library-bag {
@@ -2029,7 +2076,6 @@ details[open] > .ios-fold-summary .fold-chevron {
   align-items: flex-start;
   padding: var(--sp-4);
   border: 1px solid var(--c-border);
-  border-left: 3px solid var(--row-accent, transparent);
   border-radius: var(--r-lg);
   background: var(--c-surface);
   box-shadow: var(--shadow-xs);
@@ -2149,7 +2195,6 @@ details[open] > .ios-fold-summary .fold-chevron {
   align-items: center;
   padding: var(--sp-4);
   border-bottom: 1px solid var(--c-border);
-  border-left: 3px solid var(--row-accent, transparent);
   background: var(--c-surface);
   font-size: 13px;
   transition: background 0.15s ease;
@@ -2895,26 +2940,6 @@ details[open] > .ios-fold-summary .fold-chevron {
   color: var(--c-danger);
 }
 
-.recommend-score-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid var(--c-border-brand);
-  background: var(--c-brand-50);
-  color: var(--c-brand-700);
-  border-radius: var(--r-full);
-  padding: 2px var(--sp-2);
-  font: inherit;
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.recommend-score-pill:hover {
-  border-color: var(--c-brand-500);
-}
-
 /* 评分区 */
 .score-section {
   margin-top: var(--sp-6);
@@ -3439,6 +3464,8 @@ details[open] > .ios-fold-summary .fold-chevron {
 
   .brand,
   .nav-caption,
+  .nav-caption-row,
+  .notebook-nav-list,
   .side-divider,
   .bag-list,
   .sidebar-bottom {
@@ -3646,7 +3673,144 @@ details[open] > .ios-fold-summary .fold-chevron {
   }
 }
 
-/* ===================== 科目笔记本系统（Subject Notebooks） ===================== */
+/* Compact action menus: keep one primary action visible and group secondary tools. */
+.action-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.action-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.action-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.action-menu > summary::marker {
+  content: "";
+}
+
+.action-menu > summary.button,
+.action-menu > summary.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+
+.action-menu-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  min-width: 192px;
+  padding: var(--sp-1);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.action-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.action-menu-item:hover,
+.action-menu-item:focus-visible {
+  background: var(--c-surface-2);
+}
+
+.action-menu-item .icon {
+  flex: 0 0 20px;
+  color: var(--c-text-2);
+}
+
+.topbar-page-name {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--c-text-2);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.top-tools-menu .action-menu-panel {
+  left: auto;
+  right: 0;
+  min-width: 176px;
+}
+
+.today-more-menu > summary {
+  white-space: nowrap;
+}
+
+.today-more-menu[open] > summary .icon:last-child {
+  transform: rotate(180deg);
+}
+
+.library-more-menu > summary {
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .top-tools-menu .action-menu-panel {
+    position: fixed;
+    top: calc(var(--topbar-h) + var(--sp-2));
+    left: auto;
+    right: var(--sp-3);
+  }
+
+  .today-more-menu,
+  .today-more-menu > summary,
+  .today-more-menu .action-menu-panel {
+    width: 100%;
+  }
+
+  .today-more-menu > summary {
+    justify-content: center;
+  }
+
+  .today-more-menu .action-menu-panel {
+    top: auto;
+    bottom: calc(100% + var(--sp-2));
+  }
+
+  .library-more-menu .action-menu-panel {
+    min-width: min(220px, calc(100vw - 32px));
+  }
+}
+
+[data-theme="dark"] {
+  --nb-indigo: #9DA4F3;
+  --nb-indigo-bg: rgba(157, 164, 243, 0.16);
+  --nb-emerald: #5FD3A4;
+  --nb-emerald-bg: rgba(95, 211, 164, 0.16);
+  --nb-amber: #F0B85C;
+  --nb-amber-bg: rgba(240, 184, 92, 0.16);
+  --nb-rose: #F0867C;
+  --nb-rose-bg: rgba(240, 134, 124, 0.16);
+  --nb-sky: #67B8F7;
+  --nb-sky-bg: rgba(103, 184, 247, 0.16);
+  --nb-violet: #C09BFF;
+  --nb-violet-bg: rgba(192, 155, 255, 0.16);
+}
 :root {
   --nb-indigo: #4630cf;
   --nb-indigo-bg: rgba(70, 48, 207, 0.1);
@@ -3729,7 +3893,7 @@ details[open] > .ios-fold-summary .fold-chevron {
   gap: 6px;
   height: 32px;
   padding: 0 var(--sp-3);
-  border-radius: var(--r-full);
+  border-radius: var(--r-md);
   border: 1px solid var(--c-border);
   background: var(--c-surface);
   color: var(--c-text-2);
@@ -3766,6 +3930,7 @@ details[open] > .ios-fold-summary .fold-chevron {
   color: var(--c-text-3);
   font-size: 11px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .notebook-pill.active .count-pill {
@@ -3836,7 +4001,7 @@ details[open] > .ios-fold-summary .fold-chevron {
   gap: 6px;
   height: 32px;
   padding: 0 var(--sp-3);
-  border-radius: var(--r-full);
+  border-radius: var(--r-md);
   border: 1.5px solid var(--c-border);
   background: var(--c-surface);
   color: var(--c-text-2);
@@ -3904,4 +4069,126 @@ details[open] > .ios-fold-summary .fold-chevron {
 
 .danger-text {
   color: var(--c-danger) !important;
+}
+
+/* ===================== 全站 iOS 透明毛玻璃质感（Glassmorphism） ===================== */
+body {
+  background: var(--ambient-bg);
+  background-attachment: fixed;
+}
+
+.sidebar,
+.topbar {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight);
+}
+
+.today-band,
+.queue-row,
+.ios-fold-card,
+.plain-panel,
+.progress-ring-card,
+.library-list,
+.library-list.grid-mode .library-row,
+.library-filter-drawer,
+.history-group-rows,
+.settings-section,
+.empty-state,
+.ios-batch-dock,
+.preset-curve-card,
+.recall-panel,
+.answer-panel,
+.ios-check-row,
+.notebook-manage-row {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+.library-row,
+.history-row {
+  background: transparent;
+}
+
+.library-row:hover,
+.history-row:hover,
+.queue-row:hover {
+  background: var(--glass-bg-subtle);
+}
+
+.library-list.grid-mode .library-row:hover {
+  background: var(--glass-bg-elevated);
+}
+
+.library-outline-drawer {
+  background: var(--glass-bg-subtle);
+  border-color: var(--glass-border);
+}
+
+.dialog,
+.action-menu-panel,
+.row-menu,
+.limit-popover {
+  background: var(--glass-bg-elevated);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  backdrop-filter: blur(14px) saturate(180%);
+  border-color: var(--glass-border);
+  box-shadow: var(--shadow-lg), var(--glass-highlight);
+}
+
+.dialog::backdrop {
+  background: rgba(15, 18, 30, 0.24);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
+}
+
+.notebook-pill,
+.level-chip,
+.nb-color-swatch,
+.button-outline,
+.icon-button,
+.search-input,
+.select-input,
+.text-input,
+.text-area {
+  background: var(--glass-bg-subtle);
+  -webkit-backdrop-filter: blur(8px) saturate(150%);
+  backdrop-filter: blur(8px) saturate(150%);
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-highlight);
+}
+
+.notebook-pill:hover,
+.level-chip:hover,
+.button-outline:hover,
+.icon-button:hover {
+  background: var(--glass-bg-elevated);
+}
+
+.notebook-pill.active,
+.level-chip.active {
+  background: var(--c-brand-50);
+  border-color: var(--c-brand-500);
+}
+
+.toast {
+  background: var(--glass-bg-elevated);
+  color: var(--c-text);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+}
+
+@media (max-width: 480px) {
+  .sidebar {
+    background: var(--glass-bg-elevated);
+    -webkit-backdrop-filter: blur(24px) saturate(190%);
+    backdrop-filter: blur(24px) saturate(190%);
+  }
 }

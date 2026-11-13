@@ -237,11 +237,10 @@
         <a class="brand" href="#today" data-view="today" aria-label="StudyStyle 首页">
           <span class="brand-mark" aria-hidden="true">
             <svg width="28" height="28" viewBox="0 0 512 512" focusable="false">
-              <rect width="512" height="512" rx="112" fill="#4630CF" />
-              <path d="M226.5 88.6 A170 170 0 0 1 423.4 226.5" fill="none" stroke="#C3C8FB" stroke-width="44" stroke-linecap="round" />
-              <path d="M415.7 314.1 A170 170 0 0 1 146.7 386.2" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round" />
-              <circle cx="146.7" cy="386.2" r="30" fill="#FFFFFF" stroke="#4A34C8" stroke-width="12" />
-              <rect x="216" y="216" width="80" height="80" rx="18" fill="#FFFFFF" />
+              <path d="M226.5 88.6 A170 170 0 0 1 423.4 226.5" fill="none" stroke="var(--c-brand-300)" stroke-width="48" stroke-linecap="round" />
+              <path d="M415.7 314.1 A170 170 0 0 1 146.7 386.2" fill="none" stroke="var(--c-brand-500)" stroke-width="48" stroke-linecap="round" />
+              <circle cx="146.7" cy="386.2" r="32" fill="var(--c-brand-500)" />
+              <rect x="208" y="208" width="96" height="96" rx="22" fill="var(--c-brand-500)" />
             </svg>
           </span>
           <span>StudyStyle<small>间隔复习</small></span>
@@ -281,18 +280,17 @@
 
       <main class="main-area">
         <header class="topbar">
+          <div class="topbar-page-name" id="topbarPageName">今日复习</div>
           <div class="top-actions">
             <span class="today-date" id="todayDate"></span>
-            <button class="icon-button" id="themeToggleButton" type="button" title="切换深色/浅色外观" aria-label="切换主题">
-              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-moon"></use></svg>
-            </button>
-            <button class="icon-button" id="helpDialogButton" type="button" title="快捷键与语法速查 (?)" aria-label="快捷键帮助">
-              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-help"></use></svg>
-            </button>
-            <span class="top-sep" aria-hidden="true"></span>
-            <button class="icon-button" id="settingsButton" type="button" data-view="settings" title="设置与同步" aria-label="设置与同步">
-              <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-settings"></use></svg>
-            </button>
+            <details class="top-tools-menu action-menu">
+              <summary class="icon-button" aria-label="更多工具" title="更多工具"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-more"></use></svg></summary>
+              <div class="action-menu-panel" aria-label="设置与工具">
+                <button class="action-menu-item" id="themeToggleButton" type="button" title="切换深色/浅色外观"><svg class="icon icon-20" aria-hidden="true"><use href="#i-moon"></use></svg><span>切换主题</span></button>
+                <button class="action-menu-item" id="helpDialogButton" type="button" title="快捷键与语法速查 (?)"><svg class="icon icon-20" aria-hidden="true"><use href="#i-help"></use></svg><span>快捷键帮助</span></button>
+                <button class="action-menu-item" id="settingsButton" type="button" data-view="settings" title="设置与同步"><svg class="icon icon-20" aria-hidden="true"><use href="#i-settings"></use></svg><span>设置与同步</span></button>
+              </div>
+            </details>
             <button class="button button-primary" id="addCardButton" type="button" title="新增卡片">
               <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-plus"></use></svg>
               <span class="button-label">新增卡片</span>
@@ -334,11 +332,11 @@
           <button type="button" class="md-tool-btn" data-md-wrap="cloze" title="挖空遮罩 (Ctrl+M)">==挖空==</button>
           <button type="button" class="md-tool-btn" data-md-wrap="code" title="行内代码">`代码`</button>
           <span class="toolbar-sep" aria-hidden="true">|</span>
-          <button type="button" class="md-tool-btn tpl-btn" data-note-template="cornell" title="插入康奈尔线索笔记框架">
-            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>康奈尔模板
+          <button type="button" class="md-tool-btn tpl-btn" data-note-template="cornell" title="插入线索与细节笔记框架">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>线索笔记
           </button>
-          <button type="button" class="md-tool-btn tpl-btn" data-note-template="feynman" title="插入费曼四步讲授框架">
-            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>费曼模板
+          <button type="button" class="md-tool-btn tpl-btn" data-note-template="feynman" title="插入概念解释与举例框架">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>解释模板
           </button>
           <button type="button" class="md-tool-btn tpl-btn" data-note-template="compare" title="插入对比辨析框架">
             <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-scale"></use></svg>对比模板
@@ -418,20 +416,20 @@
               先主动回忆，再核对大纲
             </span>
             <div class="method-pill-group" id="reviewMethodSwitch" role="group" aria-label="学习方法切换">
-              <button type="button" class="method-pill active" data-study-method="blurting" title="空白主动默写">
-                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-pen-line"></use></svg>默写
+              <button type="button" class="method-pill active" data-study-method="blurting" title="先闭卷独立回忆">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-pen-line"></use></svg>闭卷回忆
               </button>
-              <button type="button" class="method-pill" data-study-method="feynman" title="费曼大白话讲授法">
-                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>费曼
+              <button type="button" class="method-pill" data-study-method="feynman" title="用自己的话解释机制并举例">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-lightbulb"></use></svg>解释机制
               </button>
-              <button type="button" class="method-pill" data-study-method="cornell" title="康奈尔主干线索提问法">
-                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>康奈尔
+              <button type="button" class="method-pill" data-study-method="cornell" title="卡住时可选展开少量线索">
+                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-layout-grid"></use></svg>可选线索
               </button>
             </div>
           </div>
           <div class="cornell-cues-box hidden" id="cornellCuesBox"></div>
           <label class="sr-only" for="recallInput">回忆草稿</label>
-          <textarea class="text-area recall-input" id="recallInput" name="recall" rows="5" placeholder="在这里默写提纲要点（若大纲含 **加粗** 或 ==挖空== 词，展开大纲时会自动核对命中率）"></textarea>
+          <textarea class="text-area recall-input" id="recallInput" name="recall" rows="5" placeholder="先闭卷写下结论、关系、条件与例子；答案展开后可用标记词辅助查漏"></textarea>
           <div class="recall-actions">
             <button class="text-button" id="clearRecall" type="button">清空草稿</button>
             <button class="button button-outline" id="cantRecall" type="button">想不起来</button>
@@ -442,25 +440,35 @@
         <!-- 第 2 步：核对 -->
         <section class="answer-panel notebook-sheet hidden" id="answerPanel" tabindex="-1" aria-labelledby="answerHeading">
           <div class="last-note-alert hidden" id="lastNoteAlert"></div>
-          <div class="keyterm-check-bar hidden" id="keyTermCheckBar" aria-live="polite"></div>
-          <div class="answer-panel-head">
-            <h3 id="answerHeading">卡片标准大纲</h3>
-            <button type="button" class="text-button hidden" id="toggleAllCloze">显隐全部挖空</button>
+          <div id="reviewAnswerContent">
+            <div class="keyterm-check-bar hidden" id="keyTermCheckBar" aria-live="polite"></div>
+            <div class="answer-panel-head">
+              <h3 id="answerHeading">卡片标准大纲</h3>
+              <button type="button" class="text-button hidden" id="toggleAllCloze">显隐全部挖空</button>
+            </div>
+            <div class="markdown-body" id="reviewOutline"></div>
+            <div class="recall-actions">
+              <button class="text-button" id="startFeedbackRecall" type="button">遮住答案，再回忆一次（可选）</button>
+              <button class="text-button" id="skipCard" type="button">跳过这张</button>
+              <button class="button button-outline" id="backToRecall" type="button">回看首次回忆</button>
+              <button class="button button-primary" id="goToScore" type="button">下一步：评分 →</button>
+            </div>
           </div>
-          <div class="markdown-body" id="reviewOutline"></div>
-          <div class="recall-actions">
-            <button class="text-button" id="skipCard" type="button">跳过这张</button>
-            <button class="button button-outline" id="backToRecall" type="button">返回继续回忆</button>
-            <button class="button button-primary" id="goToScore" type="button">下一步：评分 →</button>
+          <div class="feedback-recall-panel hidden" id="feedbackRecallPanel">
+            <label class="field-label" for="feedbackRecallInput">合上答案，用自己的话补充或重建答案</label>
+            <p class="field-note">首次回忆已单独保留。写完后重新显示答案，核对这次补充。</p>
+            <textarea class="text-area recall-input" id="feedbackRecallInput" rows="4" placeholder="只写刚才遗漏、混淆或需要补全的内容"></textarea>
+            <div class="recall-actions"><button class="button button-quiet" id="cancelFeedbackRecall" type="button">取消</button><button class="button button-primary" id="finishFeedbackRecall" type="button">重新显示答案并核对</button></div>
           </div>
         </section>
 
         <!-- 第 3 步：评分 -->
         <section class="score-section hidden" id="scoreSection" aria-labelledby="scoreHeading">
           <div class="score-label-row">
-            <h3 id="scoreHeading">这次记得怎么样？</h3>
+            <h3 id="scoreHeading">这次表现如何？</h3>
             <span class="score-next" id="scoreNextHint"></span>
           </div>
+          <p class="field-note">先按首次闭卷表现评分：看关键结论、推理步骤、条件和独立应用。反馈后补充只记录纠错变化，不计作首次表现；标记词命中数只帮助查漏。</p>
           <p class="score-preselect hidden" id="scorePreselectHint"></p>
           <div class="score-buttons" id="scoreButtons" role="radiogroup" aria-label="掌握程度评分"></div>
           <div class="fine-score">
@@ -470,6 +478,8 @@
           </div>
           <label class="field-label note-label" for="reviewNote">这次漏掉了什么 <span class="optional">选填</span></label>
           <textarea class="text-area note-input" name="note" id="reviewNote" rows="2" placeholder="记下一处下次要留意的内容"></textarea>
+          <label class="field-label note-label" for="applicationAttempt">应用练习记录 <span class="optional">选填</span></label>
+          <textarea class="text-area note-input" name="application_attempt" id="applicationAttempt" rows="2" placeholder="如果目标是会做或会用，写下你独立完成的变式、步骤或卡住的位置"></textarea>
           <div class="schedule-preview" id="schedulePreview"></div>
           <div class="review-submit-row">
             <button class="button button-outline full-button hidden" id="saveAndFinishRandom" type="button" disabled>保存并结束</button>
@@ -502,7 +512,7 @@
         <div class="help-item"><span>大纲加粗 / 挖空</span><kbd>Ctrl+B</kbd> / <kbd>Ctrl+M</kbd></div>
       </div>
       <div class="status-box" style="margin-top: 14px">
-        <strong>智能关键词自检：</strong>大纲中用 <code>**重点词**</code> 或 <code>==挖空词==</code> 标记的内容，不仅会在复习时高亮/遮罩，还会自动与你在"先回忆"框中默写的文字比对，统计命中率并支持一键将漏词填入备注。
+        <strong>标记词查漏：</strong>大纲中用 <code>**重点词**</code> 或 <code>==挖空词==</code> 标记的内容，可在核对时与回忆草稿做文本比对，并将漏词记入备注。命中数只用于定位遗漏，不能替代对结论、推理、条件和应用能力的判断。
       </div>
       <div class="dialog-foot">
         <button type="button" class="button button-primary" data-close-dialog>知道了</button>
