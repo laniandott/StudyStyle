@@ -54,6 +54,7 @@ let uiFolds = { todayInsights: false, libraryFilters: false, libraryArchived: fa
 let expandedCardIds = new Set();
 let batchMode = false;
 let selectedCardIds = new Set();
+let activeRowMenuCardId = null;
 let cardReviewStartedAt = 0;
 let reviewTimerInterval = null;
 let activeStudyMethod = 'blurting';
@@ -374,6 +375,7 @@ function levelFilterRow(cards) {
 }
 
 async function render() {
+  closeAllRowMenus();
   const allCards = await getCards();
   const allDue = await dueCards(false);
   const settings = (await getSetting()) || {};
@@ -690,13 +692,7 @@ function renderLibraryRows(cards, notebooks = [], intervals = INTERVALS) {
       <div class="library-due">${fmtDue(card)}</div>
       <div class="row-actions">
         <button class="button button-outline small-button" data-review-card="${escapeHtml(card._id)}" aria-label="复习这张卡片" title="立即复习">${icon('play')}复习</button>
-        <button class="icon-button" data-more-menu aria-label="更多操作" title="更多" aria-haspopup="true" aria-expanded="false">${icon('more')}</button>
-        <div class="row-menu hidden" role="menu">
-          <button type="button" class="row-menu-item" data-edit="${escapeHtml(card._id)}" role="menuitem">${icon('edit')}编辑卡片</button>
-          <button type="button" class="row-menu-item" data-card-history="${escapeHtml(card._id)}" role="menuitem">${icon('history')}查看记录</button>
-          <button type="button" class="row-menu-item" data-archive="${escapeHtml(card._id)}" role="menuitem">${icon('archive')}归档卡片</button>
-          <button type="button" class="row-menu-item danger" data-delete="${escapeHtml(card._id)}" role="menuitem">${icon('trash')}删除卡片</button>
-        </div>
+        <button class="icon-button" data-more-menu="${escapeHtml(card._id)}" data-card-title="${escapeHtml(card.title)}" aria-label="更多操作" title="更多" aria-haspopup="true" aria-expanded="false">${icon('more')}</button>
       </div>
       <div class="library-outline-drawer ${isOpen ? '' : 'hidden'}" id="drawer-${escapeHtml(card._id)}"><div class="markdown-body">${markdownToHtml(card.outline)}</div></div>
     </div>`;
@@ -1580,6 +1576,74 @@ function toggleLimitPopover() {
   anchor.appendChild(popover);
 }
 
+/** Close the body-level floating row menu and reset trigger states. */
+function closeAllRowMenus() {
+  activeRowMenuCardId = null;
+  const layer = $('#floatingRowMenuLayer');
+  const menu = $('#floatingRowMenu');
+  if (layer) {
+    layer.classList.add('hidden');
+    layer.setAttribute?.('aria-hidden', 'true');
+  }
+  if (menu) {
+    menu.innerHTML = '';
+    if (menu.style) {
+      menu.style.top = '';
+      menu.style.left = '';
+      menu.style.transformOrigin = '';
+    }
+  }
+  $$('[data-more-menu]').forEach(btn => btn.setAttribute?.('aria-expanded', 'false'));
+}
+
+/** Open the row overflow menu as a top-level fixed floating module above the base UI. */
+function openFloatingRowMenu(moreBtn) {
+  const cardId = moreBtn.dataset.moreMenu;
+  if (!cardId) return;
+  if (activeRowMenuCardId === cardId) {
+    closeAllRowMenus();
+    return;
+  }
+  closeAllRowMenus();
+  const layer = $('#floatingRowMenuLayer');
+  const menu = $('#floatingRowMenu');
+  if (!layer || !menu) return;
+  const cardTitle = moreBtn.dataset.cardTitle || '';
+  const safeId = escapeHtml(cardId);
+  menu.innerHTML = `${cardTitle ? `<div class="row-menu-header">${escapeHtml(cardTitle)}</div>` : ''}
+    <button type="button" class="row-menu-item" data-edit="${safeId}" role="menuitem">${icon('edit')}编辑卡片</button>
+    <button type="button" class="row-menu-item" data-card-history="${safeId}" role="menuitem">${icon('history')}查看记录</button>
+    <button type="button" class="row-menu-item" data-archive="${safeId}" role="menuitem">${icon('archive')}归档卡片</button>
+    <button type="button" class="row-menu-item danger" data-delete="${safeId}" role="menuitem">${icon('trash')}删除卡片</button>`;
+  activeRowMenuCardId = cardId;
+  moreBtn.setAttribute?.('aria-expanded', 'true');
+  layer.classList.remove('hidden');
+  layer.setAttribute?.('aria-hidden', 'false');
+
+  if (typeof moreBtn.getBoundingClientRect === 'function' && menu.style) {
+    const btnRect = moreBtn.getBoundingClientRect();
+    const menuW = menu.offsetWidth || 196;
+    const menuH = menu.offsetHeight || 190;
+    const winW = typeof window !== 'undefined' ? (window.innerWidth || 375) : 375;
+    const winH = typeof window !== 'undefined' ? (window.innerHeight || 667) : 667;
+    const pad = 12;
+    const bottomReserve = winW <= 640 ? 72 : pad;
+    const left = Math.max(pad, Math.min(btnRect.right - menuW, winW - menuW - pad));
+    const canOpenDown = btnRect.bottom + 6 + menuH <= winH - bottomReserve;
+    const canOpenUp = btnRect.top - 6 - menuH >= pad;
+    let top;
+    if (canOpenDown || !canOpenUp) {
+      top = Math.max(pad, Math.min(btnRect.bottom + 6, winH - bottomReserve - menuH));
+      menu.style.transformOrigin = 'top right';
+    } else {
+      top = Math.max(pad, btnRect.top - 6 - menuH);
+      menu.style.transformOrigin = 'bottom right';
+    }
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+}
+
 /* ===================== 事件委托 ===================== */
 document.addEventListener('click', async event => {
   try {
@@ -1612,20 +1676,11 @@ document.addEventListener('click', async event => {
     if (target.closest('#helpDialogButton')) { if ($('#helpDialog')) $('#helpDialog').showModal(); return; }
     if (target.closest('#undoReviewButton,[data-action="undo-review"]')) { await undoLastReview(); return; }
 
-    /* 更多菜单（⋯）：互斥展开，点击空白处收起 */
+    /* 卡片更多操作：在 body 顶层作为独立悬浮模块展开，彻底脱离底层容器与玻璃层级遮挡 */
+    if (target.closest('[data-close-floating-menu]')) { closeAllRowMenus(); return; }
     const moreBtn = target.closest('[data-more-menu]');
-    if (moreBtn) {
-      const menu = moreBtn.parentElement.querySelector('.row-menu');
-      const willOpen = menu ? menu.classList.contains('hidden') : false;
-      $$('.row-menu').forEach(item => item.classList.add('hidden'));
-      $$('[data-more-menu]').forEach(btn => btn.setAttribute?.('aria-expanded', 'false'));
-      if (menu && willOpen) { menu.classList.remove('hidden'); moreBtn.setAttribute?.('aria-expanded', 'true'); }
-      return;
-    }
-    if (!target.closest('.row-menu')) {
-      const openMenus = $$('.row-menu:not(.hidden)');
-      if (openMenus.length) { openMenus.forEach(item => item.classList.add('hidden')); $$('[data-more-menu]').forEach(btn => btn.setAttribute?.('aria-expanded', 'false')); }
-    }
+    if (moreBtn) { openFloatingRowMenu(moreBtn); return; }
+    if (activeRowMenuCardId && !target.closest('#floatingRowMenu')) closeAllRowMenus();
 
     const nav = target.closest('[data-view]'); if (nav) { if (nav.tagName === 'A') event.preventDefault(); view = nav.dataset.view; activeBagFilter = null; activeHistoryCardFilter = null; await render(); return; }
     const nbFilter = target.closest('[data-notebook-filter]');
@@ -1836,10 +1891,10 @@ document.addEventListener('click', async event => {
       showToast('基础调度规则与学习方法设定已保存');
       await render();
     }
-    const edit = target.closest('[data-edit]'); if (edit) { $('.row-menu')?.classList.add('hidden'); await openCardDialog(await db.get(edit.dataset.edit)); }
-    const archive = target.closest('[data-archive]'); if (archive) { $('.row-menu')?.classList.add('hidden'); const yes = await askConfirm('归档卡片', '归档后卡片会从复习池移出，可在卡片库底部恢复。', '归档'); if (yes) { await archiveCard(archive.dataset.archive); await render(); showToast('卡片已归档'); } }
+    const edit = target.closest('[data-edit]'); if (edit) { closeAllRowMenus(); await openCardDialog(await db.get(edit.dataset.edit)); }
+    const archive = target.closest('[data-archive]'); if (archive) { closeAllRowMenus(); const yes = await askConfirm('归档卡片', '归档后卡片会从复习池移出，可在卡片库底部恢复。', '归档'); if (yes) { await archiveCard(archive.dataset.archive); await render(); showToast('卡片已归档'); } }
     const restore = target.closest('[data-restore]'); if (restore) { await archiveCard(restore.dataset.restore, true); await render(); showToast('卡片已恢复'); }
-    const del = target.closest('[data-delete]'); if (del) { $('.row-menu')?.classList.add('hidden'); const yes = await askConfirm('彻底删除卡片', '删除后卡片及其所有复习历史记录将被永久移除，确定继续？', '彻底删除'); if (yes) { await deleteCard(del.dataset.delete); await render(); showToast('卡片已删除'); } }
+    const del = target.closest('[data-delete]'); if (del) { closeAllRowMenus(); const yes = await askConfirm('彻底删除卡片', '删除后卡片及其所有复习历史记录将被永久移除，确定继续？', '彻底删除'); if (yes) { await deleteCard(del.dataset.delete); await render(); showToast('卡片已删除'); } }
     const preset = target.closest('[data-score-preset]'); if (preset) { const i = Number(preset.dataset.scorePreset); selectScore(SCORE_PRESETS[i], i); }
   } catch (err) { console.error(err); showToast(`操作出错：${err.message || err}`); }
 });
@@ -2132,6 +2187,9 @@ async function seedDemoCards() {
 
 /* 兜底：自定义阶梯折叠时仍能保存当前曲线 */
 window.addEventListener('storage', event => { if (event.key === LOCAL_KEY && !pouchMode) render(); });
+window.addEventListener('resize', () => { if (activeRowMenuCardId) closeAllRowMenus(); });
+window.addEventListener('scroll', () => { if (activeRowMenuCardId) closeAllRowMenus(); }, { passive: true });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && activeRowMenuCardId) closeAllRowMenus(); });
 /* 页面隐藏/关闭前立即冲刷待推送数据，避免防抖窗口内关页导致本次改动未同步 */
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushServerStore(); });
 window.addEventListener('beforeunload', () => flushServerStore());
