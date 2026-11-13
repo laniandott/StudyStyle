@@ -2,9 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#F7F8FA" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#EEF0FF" id="themeColorMeta" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="StudyStyle" />
     <title>StudyStyle · 间隔提醒</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./domain.cjs"></script>
@@ -289,6 +296,7 @@
                 <button class="action-menu-item" id="themeToggleButton" type="button" title="切换深色/浅色外观"><svg class="icon icon-20" aria-hidden="true"><use href="#i-moon"></use></svg><span>切换主题</span></button>
                 <button class="action-menu-item" id="helpDialogButton" type="button" title="快捷键与语法速查 (?)"><svg class="icon icon-20" aria-hidden="true"><use href="#i-help"></use></svg><span>快捷键帮助</span></button>
                 <button class="action-menu-item" id="settingsButton" type="button" data-view="settings" title="设置与同步"><svg class="icon icon-20" aria-hidden="true"><use href="#i-settings"></use></svg><span>设置与同步</span></button>
+                <button class="action-menu-item hidden" id="pwaInstallMenuBtn" type="button" data-action="install-pwa" title="安装为独立应用"><svg class="icon icon-20" aria-hidden="true"><use href="#i-download"></use></svg><span>安装为应用</span></button>
               </div>
             </details>
             <button class="button button-primary" id="addCardButton" type="button" title="新增卡片">

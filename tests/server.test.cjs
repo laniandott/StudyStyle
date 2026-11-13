@@ -431,10 +431,38 @@ test('健康检查与静态资源不受加固影响', async t => {
   assert.equal(index.status, 200);
   assert.match(index.headers.get('content-type'), /text\/html/);
 
-  const assets = await Promise.all(['styles.css', 'app.js', 'domain.cjs', 'favicon.svg'].map(
+  const assets = await Promise.all(['styles.css', 'app.js', 'domain.cjs', 'favicon.svg', 'manifest.webmanifest', 'sw.js', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'].map(
     name => fetch(`${srv.base}/${name}`)
   ));
   for (const res of assets) assert.equal(res.status, 200);
+});
+
+// 附加：PWA 清单、Service Worker 与 PNG 图标响应头与内容合法
+test('PWA 清单、Service Worker 与图标接口可用', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const manifestRes = await fetch(`${srv.base}/manifest.webmanifest`);
+  assert.equal(manifestRes.status, 200);
+  assert.match(manifestRes.headers.get('content-type'), /application\/manifest\+json/);
+  const manifest = await manifestRes.json();
+  assert.equal(manifest.display, 'standalone');
+  assert.ok(manifest.icons.some(i => i.sizes === '192x192' && i.type === 'image/png'));
+  assert.ok(manifest.icons.some(i => i.sizes === '512x512' && i.purpose === 'maskable'));
+
+  const swRes = await fetch(`${srv.base}/sw.js`);
+  assert.equal(swRes.status, 200);
+  assert.match(swRes.headers.get('content-type'), /javascript/);
+  const swText = await swRes.text();
+  assert.match(swText, /\/api\//);
+
+  for (const iconName of ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png']) {
+    const iconRes = await fetch(`${srv.base}/${iconName}`);
+    assert.equal(iconRes.status, 200);
+    assert.equal(iconRes.headers.get('content-type'), 'image/png');
+    const bytes = new Uint8Array(await iconRes.arrayBuffer());
+    assert.deepEqual([...bytes.slice(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `${iconName} 应为合法 PNG`);
+  }
 });
 
 // 附加：删除墓碑必须能传播，否则服务端残留的旧卡片会被「复活」

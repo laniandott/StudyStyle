@@ -19,6 +19,7 @@ const SCORE_GRADES = ['完全忘记', '忘记', '勉强', '记得', '很熟'];
 const LEVEL_NAMES = BAG_ORDER.map(level => level.name);
 
 const LOCAL_KEY = 'studystyle-fallback-v1';
+const COUCH_LOCAL_CREDS_KEY = 'studystyle-couch-local-v1';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const uuid = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -50,11 +51,15 @@ let activeNotebookFilter = null;
 let selectedNotebookColor = 'indigo';
 let activeHistoryCardFilter = null;
 let libraryFilter = { query: '', tag: 'all', status: 'all', sort: 'due', layout: 'list' };
-let uiFolds = { todayInsights: false, libraryFilters: false, libraryArchived: false, couchSettings: false, batchImporter: false, customLadder: false, importJson: false };
+let uiFolds = { todayInsights: false, libraryFilters: false, libraryArchived: false, couchSettings: false, batchImporter: false, customLadder: false, importJson: false, pwaInfo: false };
 let expandedCardIds = new Set();
 let batchMode = false;
 let selectedCardIds = new Set();
 let activeRowMenuCardId = null;
+let deferredInstallPrompt = null;
+let swRegistration = null;
+let couchStatusState = { text: '', variant: '' };
+let couchConnectPromise = null;
 let cardReviewStartedAt = 0;
 let reviewTimerInterval = null;
 let activeStudyMethod = 'blurting';
@@ -232,11 +237,74 @@ db = createLocalStore();
 function applyTheme(theme = 'light') {
   const normalized = theme === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = normalized;
+  $('#themeColorMeta')?.setAttribute?.('content', normalized === 'dark' ? '#0D1020' : '#EEF0FF');
   const btn = $('#themeToggleButton');
   if (btn) {
     btn.innerHTML = icon(normalized === 'dark' ? 'sun' : 'moon', 'icon icon-20');
     btn.title = normalized === 'dark' ? '切换为浅色外观' : '切换为深色外观';
     btn.setAttribute?.('aria-label', normalized === 'dark' ? '切换为浅色外观' : '切换为深色外观');
+  }
+}
+
+function isStandalonePwa() {
+  return Boolean(
+    (typeof window !== 'undefined' && window.matchMedia?.('(display-mode: standalone)')?.matches) ||
+    (typeof navigator !== 'undefined' && navigator.standalone === true)
+  );
+}
+
+function isPwaSecureContext() {
+  if (typeof location === 'undefined') return false;
+  return location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+}
+
+function updateInstallControls() {
+  const menuBtn = $('#pwaInstallMenuBtn');
+  if (menuBtn) menuBtn.classList.toggle('hidden', !(deferredInstallPrompt && !isStandalonePwa()));
+}
+
+async function installPwaApp() {
+  if (!deferredInstallPrompt) {
+    showToast('请在浏览器菜单或分享面板中选择「添加到主屏幕」');
+    return;
+  }
+  const promptEvent = deferredInstallPrompt;
+  deferredInstallPrompt = null;
+  updateInstallControls();
+  try {
+    await promptEvent.prompt();
+    const choice = await promptEvent.userChoice;
+    if (choice?.outcome === 'accepted') showToast('正在将 StudyStyle 安装到设备');
+  } catch (err) {
+    console.error(err);
+  }
+  if (view === 'settings') await render();
+}
+
+async function registerPwaServiceWorker() {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator) || !isPwaSecureContext()) return null;
+  try {
+    swRegistration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    return swRegistration;
+  } catch (err) {
+    console.error('SW registration failed:', err);
+    return null;
+  }
+}
+
+async function refreshPwaOfflineCache() {
+  if (!swRegistration) swRegistration = await registerPwaServiceWorker();
+  if (!swRegistration) {
+    showToast(isPwaSecureContext() ? '当前环境不支持离线缓存组件' : '请通过 HTTPS 或 localhost 访问以启用离线缓存');
+    return;
+  }
+  try {
+    await swRegistration.update();
+    if (swRegistration.waiting) swRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    showToast('已检查并刷新离线应用缓存');
+    if (view === 'settings') await render();
+  } catch (err) {
+    showToast(`刷新缓存失败：${err.message || err}`);
   }
 }
 
@@ -252,6 +320,12 @@ async function toggleTheme() {
 async function initStore() {
   if (!db) db = createLocalStore();
   pouchMode = false;
+  if (typeof location !== 'undefined' && location.search && typeof URLSearchParams !== 'undefined') {
+    const reqView = new URLSearchParams(location.search).get('view');
+    if (['today', 'library', 'history', 'settings'].includes(reqView)) view = reqView;
+  }
+  void registerPwaServiceWorker();
+  updateInstallControls();
   await hydrateFromServerStore();
   let settings = await getSetting();
   if (!settings) {
@@ -271,6 +345,7 @@ async function initStore() {
   activeStudyMethod = settings?.study_method || 'blurting';
   applyTheme(settings?.theme || 'light');
   await render();
+  void resumeSavedCouchSync();
 }
 
 /* 墓碑（_deleted）是删除意图的传播载体，对业务读取一律透明过滤 */
@@ -413,9 +488,7 @@ async function render() {
   if (view === 'history') $('#viewRoot').innerHTML = await renderHistory(notebooks, allCards, allDue);
   if (view === 'settings') $('#viewRoot').innerHTML = await renderSettings();
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
-  const sync = syncHandler != null || serverStoreActive;
-  const dot = $('#syncDot'); if (dot) dot.classList.toggle('connected', sync);
-  const label = $('#syncLabel'); if (label) label.textContent = syncHandler != null ? 'CouchDB 同步中' : (serverStoreActive ? '服务端已持久化' : '仅本机保存');
+  updateSyncIndicator();
 }
 
 /* ===================== 今日复习页 ===================== */
@@ -761,7 +834,15 @@ async function renderHistory(notebooks = [], allCards = [], allDue = []) {
 
 /* ===================== 设置与同步（4 组 · 渐进披露） ===================== */
 async function renderSettings() {
-  const saved = (await getSetting()) || {}; const couch = saved.couch || {}; const isDark = saved.theme === 'dark';
+  const saved = (await getSetting()) || {};
+  const savedCreds = loadSavedCouchCreds();
+  const couch = saved.couch || {};
+  const prefillUrl = savedCreds?.url || couch.url || '';
+  const prefillDb = savedCreds?.name || couch.name || '';
+  const prefillUser = savedCreds?.user || couch.user || '';
+  const prefillPass = savedCreds?.password || '';
+  const rememberChecked = savedCreds ? Boolean(savedCreds.password) : true;
+  const isDark = saved.theme === 'dark';
   const currentDaysStr = (saved.interval_days || INTERVALS).join(', ');
   const passThreshold = Number(saved.hold_interval_below_score ?? 40);
   const lowAction = saved.default_low_action || 'hold';
@@ -859,23 +940,45 @@ async function renderSettings() {
           </div>
         </div>
       </details>
+      <details class="ios-fold-section" data-fold-key="pwaInfo" ${uiFolds.pwaInfo || deferredInstallPrompt ? 'open' : ''} style="margin-top:var(--sp-2)">
+        <summary class="ios-fold-summary"><span class="fold-title-group"><span class="fold-icon">${icon('cards')}</span><span>安装为应用 (PWA) 与离线使用</span></span><span class="fold-chevron">${icon('chevron-right')}</span></summary>
+        <div class="ios-fold-body">
+          <div class="field-note">
+            ${isStandalonePwa() ? '当前正以独立应用模式运行。' : '可添加到手机主屏幕或桌面像独立 App 一样全屏运行。'}
+            ${swRegistration ? '离线外壳已就绪，断网时仍可复习本地卡片。' : (isPwaSecureContext() ? '正在准备离线外壳…' : '当前为非加密 HTTP 地址：iOS Safari「添加到主屏幕」仍可全屏使用；完整离线缓存与一键安装需通过 HTTPS 或 localhost 访问。')}
+          </div>
+          <div class="settings-actions" style="margin-top:var(--sp-2)">
+            ${!isStandalonePwa() && deferredInstallPrompt ? `<button class="button button-primary small-button" data-action="install-pwa">${icon('download')}一键安装应用</button>` : ''}
+            <button class="button button-outline small-button" data-action="refresh-pwa-cache">${icon('sync')}更新离线缓存</button>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section class="settings-section">
       <h2>${icon('sync')}多设备同步</h2>
       <p>连接个人 CouchDB 后可在多设备间双向同步；本地单机使用无需配置。</p>
-      <details class="ios-fold-section" data-fold-key="couchSettings" ${uiFolds.couchSettings || syncHandler || couch.url ? 'open' : ''}>
+      <details class="ios-fold-section" data-fold-key="couchSettings" ${uiFolds.couchSettings || syncHandler || prefillUrl ? 'open' : ''}>
         <summary class="ios-fold-summary"><span class="fold-title-group"><span class="fold-icon">${icon('cloud')}</span><span>高级：连接个人 CouchDB</span></span><span class="fold-chevron">${icon('chevron-right')}</span></summary>
         <div class="ios-fold-body">
           <div class="field-note">需要已创建的数据库和有读写权限的专用账号。浏览器直连需要服务器启用 HTTPS 与 CORS。</div>
           <div class="settings-grid" style="grid-template-columns:1fr 1fr;margin-top:var(--sp-2)">
-            <div class="settings-field"><label class="field-label" for="couchUrl">HTTPS 服务地址</label><input class="text-input" id="couchUrl" type="url" placeholder="https://db.example.com" value="${escapeHtml(couch.url || '')}" /></div>
-            <div class="settings-field"><label class="field-label" for="couchDb">数据库名</label><input class="text-input" id="couchDb" placeholder="studystyle" value="${escapeHtml(couch.name || '')}" /></div>
-            <div class="settings-field"><label class="field-label" for="couchUser">专用用户名</label><input class="text-input" id="couchUser" autocomplete="username" value="${escapeHtml(couch.user || '')}" /></div>
-            <div class="settings-field"><label class="field-label" for="couchPass">密码 <span class="optional">不会写入备份</span></label><input class="text-input" id="couchPass" type="password" autocomplete="current-password" /></div>
+            <div class="settings-field"><label class="field-label" for="couchUrl">HTTPS 服务地址</label><input class="text-input" id="couchUrl" type="url" placeholder="https://db.example.com" value="${escapeHtml(prefillUrl)}" /></div>
+            <div class="settings-field"><label class="field-label" for="couchDb">数据库名</label><input class="text-input" id="couchDb" placeholder="studystyle" value="${escapeHtml(prefillDb)}" /></div>
+            <div class="settings-field"><label class="field-label" for="couchUser">专用用户名</label><input class="text-input" id="couchUser" autocomplete="username" value="${escapeHtml(prefillUser)}" /></div>
+            <div class="settings-field"><label class="field-label" for="couchPass">密码 <span class="optional">不会写入同步库或导出备份</span></label><input class="text-input" id="couchPass" type="password" autocomplete="current-password" value="${escapeHtml(prefillPass)}" /></div>
           </div>
-          <div class="settings-actions"><button class="button button-outline" data-action="test-couch">测试连接</button><button class="button button-primary" data-action="connect-couch">连接并同步</button>${syncHandler ? '<button class="button button-quiet" data-action="disconnect-couch">断开</button>' : ''}</div>
-          <div class="status-box" id="couchStatus">${syncHandler ? '已连接，正在双向同步。' : pouchMode ? '本地 PouchDB 可用。填入服务器信息后测试连接。' : '按需点击「测试连接」时将自动加载同步组件。'}</div>
+          <label class="ios-check-row" style="margin-top:var(--sp-3)">
+            <input type="checkbox" id="couchRememberCheck" ${rememberChecked ? 'checked' : ''} />
+            <span><strong>在此已验证浏览器长期保存同步信息：</strong>验证通过后仅保存在本机浏览器，下次打开无需重新填写账号密码并自动连接同步</span>
+          </label>
+          <div class="settings-actions">
+            <button class="button button-outline" data-action="test-couch">测试连接</button>
+            <button class="button button-primary" data-action="connect-couch">连接并同步</button>
+            ${syncHandler ? '<button class="button button-quiet" data-action="disconnect-couch">断开</button>' : ''}
+            ${savedCreds?.password ? '<button class="button button-quiet" data-action="forget-couch">清除已保存凭据</button>' : ''}
+          </div>
+          <div class="status-box ${escapeHtml(couchStatusState.variant)}" id="couchStatus">${escapeHtml(couchStatusState.text || (syncHandler ? '已连接，正在双向同步。' : (savedCreds?.password ? '已在本浏览器保存通过验证的同步信息，无需重填密码，可直接点击「连接并同步」。' : (pouchMode ? '本地 PouchDB 可用。填入服务器信息后测试连接。' : '按需点击「测试连接」时将自动加载同步组件。'))))}</div>
         </div>
       </details>
     </section>
@@ -1551,9 +1654,197 @@ async function importData(file) {
   } catch (error) { showToast(`导入失败：${error.message}`); }
 }
 
-function couchInput() { const url = $('#couchUrl').value.trim().replace(/\/$/, ''); const name = $('#couchDb').value.trim(); const user = $('#couchUser').value.trim(); const password = $('#couchPass').value; if (!url.startsWith('https://')) throw new Error('服务地址必须使用 HTTPS'); const parsed = new URL(url); if (parsed.username || parsed.password) throw new Error('请勿把账号或密码写进服务地址'); if (!name || !user || !password) throw new Error('请填写数据库名、用户名和密码'); return { url, name, user, password }; }
-async function connectCouch(testOnly = false) { const status = $('#couchStatus'); try { await ensurePouchDB(); if (!pouchMode) { const pouch = new window.PouchDB('studystyle'); const fallbackDocs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]'); for (const { _rev, ...doc } of fallbackDocs) { const existing = await pouch.get(doc._id).catch(() => null); if (!existing) await pouch.put(doc); } db = pouch; pouchMode = true; } const info = couchInput(); const remote = new PouchDB(`${info.url}/${encodeURIComponent(info.name)}`, { auth: { username: info.user, password: info.password }, skip_setup: true }); status.className = 'status-box'; status.textContent = '正在验证数据库连接与读写权限…'; await remote.info(); const probe = `studystyle:probe:${uuid()}`; const inserted = await remote.put({ _id: probe, type: 'probe', at: new Date().toISOString() }); await remote.remove({ _id: probe, _rev: inserted.rev }); const settings = await getSetting(); await saveSetting({ ...settings, couch: { url: info.url, name: info.name, user: info.user } }); if (testOnly) { status.className = 'status-box success'; status.textContent = '连接成功，数据库读写权限正常。尚未开始同步。'; return; } if (syncHandler) syncHandler.cancel(); syncHandler = db.sync(remote, { live: true, retry: true }).on('change', async () => { await render(); }).on('paused', () => { status.className = 'status-box success'; status.textContent = '已同步，正在监听变更。'; $('#syncDot').classList.add('connected'); $('#syncLabel').textContent = 'CouchDB 已同步'; }).on('active', () => { status.className = 'status-box'; status.textContent = '同步中…'; }).on('denied', error => { status.className = 'status-box error'; status.textContent = `权限不足：${error.message}`; }).on('error', error => { status.className = 'status-box error'; status.textContent = `同步错误：${error.message}`; }); status.className = 'status-box success'; status.textContent = '连接成功，首次双向同步已启动。首次同步期间请保持此页面打开。'; await render(); } catch (error) { status.className = 'status-box error'; status.textContent = error.message || '连接失败，请检查地址、认证、CORS 和数据库权限。'; } }
-async function disconnectCouch() { if (syncHandler) { syncHandler.cancel(); syncHandler = null; } await render(); showToast('已断开远端同步，本地数据保留'); }
+function loadSavedCouchCreds() {
+  try {
+    const raw = localStorage.getItem(COUCH_LOCAL_CREDS_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data.url !== 'string' || typeof data.name !== 'string' || typeof data.user !== 'string' || typeof data.password !== 'string') {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function saveVerifiedCouchCreds(creds) {
+  try {
+    localStorage.setItem(COUCH_LOCAL_CREDS_KEY, JSON.stringify({
+      url: creds.url,
+      name: creds.name,
+      user: creds.user,
+      password: creds.password,
+      autoConnect: Boolean(creds.autoConnect),
+      verifiedAt: creds.verifiedAt || new Date().toISOString()
+    }));
+  } catch { /* 浏览器存储不可用或配额满时不阻断同步 */ }
+}
+
+function clearSavedCouchCreds() {
+  try { localStorage.removeItem(COUCH_LOCAL_CREDS_KEY); } catch {}
+}
+
+function setCouchStatus(text, variant = '') {
+  couchStatusState = { text, variant };
+  const status = $('#couchStatus');
+  if (!status) return;
+  status.className = variant ? `status-box ${variant}` : 'status-box';
+  status.textContent = text;
+}
+
+function updateSyncIndicator(customLabel = null) {
+  const sync = syncHandler != null || serverStoreActive;
+  const dot = $('#syncDot'); if (dot) dot.classList.toggle('connected', sync);
+  const label = $('#syncLabel');
+  if (label) {
+    label.textContent = customLabel || (syncHandler != null ? 'CouchDB 同步中' : (serverStoreActive ? '服务端已持久化' : '仅本机保存'));
+  }
+}
+
+function validateCouchConfig(raw) {
+  const url = String(raw?.url || '').trim().replace(/\/$/, '');
+  const name = String(raw?.name || '').trim();
+  const user = String(raw?.user || '').trim();
+  const password = String(raw?.password ?? '');
+  if (!url.startsWith('https://')) throw new Error('服务地址必须使用 HTTPS');
+  const parsed = new URL(url);
+  if (parsed.username || parsed.password) throw new Error('请勿把账号或密码写进服务地址');
+  if (!name || !user || !password) throw new Error('请填写数据库名、用户名和密码');
+  return { url, name, user, password };
+}
+
+function couchInput() {
+  return validateCouchConfig({
+    url: $('#couchUrl')?.value,
+    name: $('#couchDb')?.value,
+    user: $('#couchUser')?.value,
+    password: $('#couchPass')?.value
+  });
+}
+
+async function migrateLocalDocsToPouch() {
+  if (pouchMode) return;
+  const pouch = new window.PouchDB('studystyle');
+  const fallbackDocs = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+  for (const { _rev, ...doc } of fallbackDocs) {
+    const existing = await pouch.get(doc._id).catch(() => null);
+    if (!existing) {
+      await pouch.put(doc);
+    } else if (Domain.pickNewerDoc(doc, existing) === doc) {
+      await pouch.put({ ...doc, _rev: existing._rev });
+    }
+  }
+  db = pouch;
+  pouchMode = true;
+}
+
+async function connectCouch(testOnly = false, overrideCreds = null) {
+  if (couchConnectPromise) return couchConnectPromise;
+  couchConnectPromise = (async () => {
+    const isSilent = Boolean(overrideCreds);
+    try {
+      const info = overrideCreds ? validateCouchConfig(overrideCreds) : couchInput();
+      const remember = overrideCreds ? true : Boolean($('#couchRememberCheck') ? $('#couchRememberCheck').checked : true);
+      const existingSaved = loadSavedCouchCreds();
+
+      await ensurePouchDB();
+      await migrateLocalDocsToPouch();
+      const remote = new window.PouchDB(`${info.url}/${encodeURIComponent(info.name)}`, {
+        auth: { username: info.user, password: info.password },
+        skip_setup: true
+      });
+      setCouchStatus(isSilent ? '正在使用本机已保存的凭据恢复同步…' : '正在验证数据库连接与读写权限…');
+      await remote.info();
+      const probe = `studystyle:probe:${uuid()}`;
+      const inserted = await remote.put({ _id: probe, type: 'probe', at: new Date().toISOString() });
+      await remote.remove({ _id: probe, _rev: inserted.rev });
+
+      const settings = await getSetting();
+      await saveSetting({ ...(settings || {}), couch: { url: info.url, name: info.name, user: info.user } });
+
+      if (remember) {
+        saveVerifiedCouchCreds({
+          ...info,
+          autoConnect: testOnly ? Boolean(existingSaved?.autoConnect) : true
+        });
+      } else {
+        clearSavedCouchCreds();
+      }
+
+      if (testOnly) {
+        setCouchStatus(
+          remember
+            ? '连接成功，数据库读写权限正常。已在本机浏览器保存通过验证的同步信息（尚未开始同步）。'
+            : '连接成功，数据库读写权限正常。尚未开始同步。',
+          'success'
+        );
+        if (!isSilent && view === 'settings') await render();
+        return;
+      }
+
+      if (syncHandler) syncHandler.cancel();
+      syncHandler = db.sync(remote, { live: true, retry: true })
+        .on('change', async () => { await render(); })
+        .on('paused', () => {
+          setCouchStatus(remember ? '已同步，正在监听远端变更（已保存本机免重填凭据）。' : '已同步，正在监听变更。', 'success');
+          updateSyncIndicator('CouchDB 已同步');
+        })
+        .on('active', () => {
+          setCouchStatus('同步中…');
+          updateSyncIndicator('CouchDB 同步中');
+        })
+        .on('denied', error => { setCouchStatus(`权限不足：${error.message}`, 'error'); })
+        .on('error', error => { setCouchStatus(`同步错误：${error.message}`, 'error'); });
+
+      setCouchStatus(
+        remember
+          ? '连接成功，双向同步已启动并长期保存于本机浏览器。'
+          : '连接成功，首次双向同步已启动。首次同步期间请保持此页面打开。',
+        'success'
+      );
+      await render();
+    } catch (error) {
+      const msg = error?.message || '连接失败，请检查地址、认证、CORS 和数据库权限。';
+      setCouchStatus(isSilent ? `自动恢复同步失败：${msg}` : msg, 'error');
+    } finally {
+      couchConnectPromise = null;
+    }
+  })();
+  return couchConnectPromise;
+}
+
+async function resumeSavedCouchSync() {
+  if (syncHandler || couchConnectPromise) return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  const saved = loadSavedCouchCreds();
+  if (!saved?.autoConnect || !saved.password) return;
+  await connectCouch(false, saved);
+}
+
+async function disconnectCouch() {
+  if (syncHandler) { syncHandler.cancel(); syncHandler = null; }
+  const saved = loadSavedCouchCreds();
+  if (saved) saveVerifiedCouchCreds({ ...saved, autoConnect: false });
+  setCouchStatus(saved
+    ? '已断开远端同步（本机已保存的连接信息仍保留，可随时重新连接或清除）。'
+    : '已断开远端同步。');
+  await render();
+  showToast('已断开远端同步，本地数据保留');
+}
+
+async function forgetSavedCouch() {
+  if (syncHandler) { syncHandler.cancel(); syncHandler = null; }
+  clearSavedCouchCreds();
+  const settings = await getSetting();
+  if (settings?.couch) {
+    const { couch, ...rest } = settings;
+    await saveSetting(rest);
+  }
+  setCouchStatus('已清除本浏览器保存的同步服务器信息与密码。');
+  await render();
+  showToast('已清除本机保存的同步凭据');
+}
 
 /* ===================== 每日上限就地选择 ===================== */
 const DAILY_LIMIT_OPTIONS = [
@@ -1771,6 +2062,8 @@ document.addEventListener('click', async event => {
     const cardHistory = target.closest('[data-card-history]'); if (cardHistory) { activeHistoryCardFilter = cardHistory.dataset.cardHistory; view = 'history'; await render(); return; }
     const action = target.closest('[data-action]')?.dataset.action;
     if (action === 'reload') { location.reload(); return; }
+    if (action === 'install-pwa') { await installPwaApp(); return; }
+    if (action === 'refresh-pwa-cache') { await refreshPwaOfflineCache(); return; }
     if (action === 'open-notebook-dialog') { await openNotebookDialog(); return; }
     if (action === 'run-batch-import') { await batchCreateFromMarkdown(); return; }
     if (action === 'toggle-batch-mode') { batchMode = !batchMode; if (!batchMode) selectedCardIds.clear(); await render(); filterLibrary(); return; }
@@ -1866,6 +2159,7 @@ document.addEventListener('click', async event => {
     if (action === 'test-couch') await connectCouch(true);
     if (action === 'connect-couch') await connectCouch(false);
     if (action === 'disconnect-couch') await disconnectCouch();
+    if (action === 'forget-couch') await forgetSavedCouch();
     if (action === 'save-intervals') {
       const daysInput = $('#intervalDays');
       const fallback = daysInput ? [] : ((await getSetting())?.interval_days || INTERVALS);
@@ -2187,6 +2481,28 @@ async function seedDemoCards() {
 
 /* 兜底：自定义阶梯折叠时仍能保存当前曲线 */
 window.addEventListener('storage', event => { if (event.key === LOCAL_KEY && !pouchMode) render(); });
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault?.();
+  deferredInstallPrompt = event;
+  updateInstallControls();
+  if (view === 'settings') render();
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  updateInstallControls();
+  showToast('StudyStyle 已安装，可从桌面或主屏幕直接启动');
+  if (view === 'settings') render();
+});
+window.addEventListener('online', async () => {
+  showToast('网络已恢复，正在同步服务端数据');
+  await hydrateFromServerStore();
+  flushServerStore();
+  void resumeSavedCouchSync();
+  await render();
+});
+window.addEventListener('offline', () => {
+  showToast('当前处于离线模式，复习与编辑操作已暂存本地');
+});
 window.addEventListener('resize', () => { if (activeRowMenuCardId) closeAllRowMenus(); });
 window.addEventListener('scroll', () => { if (activeRowMenuCardId) closeAllRowMenus(); }, { passive: true });
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && activeRowMenuCardId) closeAllRowMenus(); });

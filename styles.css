@@ -610,13 +610,13 @@ a {
 
 /* ===================== 顶栏 ===================== */
 .topbar {
-  height: var(--topbar-h);
+  min-height: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 var(--sp-6);
+  padding: env(safe-area-inset-top, 0px) var(--sp-6) 0;
   position: sticky;
   top: 0;
   z-index: 10;
@@ -3546,7 +3546,7 @@ details[open] > .ios-fold-summary .fold-chevron {
   }
 
   .topbar {
-    padding: 0 var(--sp-4);
+    padding: env(safe-area-inset-top, 0px) var(--sp-4) 0;
   }
 
   .topbar-page-name {
@@ -3628,7 +3628,7 @@ details[open] > .ios-fold-summary .fold-chevron {
 
   .level-filter-row {
     position: sticky;
-    top: var(--topbar-h);
+    top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
     background: var(--c-bg);
     z-index: 1;
     padding-top: var(--sp-1);
@@ -3837,7 +3837,7 @@ details[open] > .ios-fold-summary .fold-chevron {
 @media (max-width: 640px) {
   .top-tools-menu .action-menu-panel {
     position: fixed;
-    top: calc(var(--topbar-h) + var(--sp-2));
+    top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px) + var(--sp-2));
     left: auto;
     right: var(--sp-3);
   }

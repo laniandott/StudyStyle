@@ -16,6 +16,9 @@ test('app.js initializes, renders all views, and completes full card & review li
   assert.match(html, /id="helpDialogButton"/);
   assert.match(html, /id="settingsButton"/);
   assert.match(html, /<details class="top-tools-menu action-menu">[\s\S]*<button class="action-menu-item" id="settingsButton"[^>]*data-view="settings"/);
+  assert.match(html, /<link rel="manifest" href="manifest\.webmanifest"/);
+  assert.match(html, /<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon\.png"/);
+  assert.match(html, /id="themeColorMeta"/);
   assert.match(styles, /\.top-tools-menu \.action-menu-panel\s*\{\s*left:\s*auto;\s*right:\s*0;/);
   assert.match(styles, /\.top-tools-menu \.action-menu-panel\s*\{\s*position:\s*fixed;\s*top:[^}]+left:\s*auto;\s*right:\s*var\(--sp-3\);/);
 
@@ -48,9 +51,11 @@ test('app.js initializes, renders all views, and completes full card & review li
         open: false,
         returnValue: '',
         dataset: {},
+        attributes: {},
         style: {},
         classList: new MockClassList(),
         listeners: {},
+        setAttribute(k, v) { this.attributes[k] = String(v); },
         elements: new Proxy({}, {
           get(target, prop) {
             if (!target[prop]) target[prop] = { value: '' };
@@ -155,8 +160,13 @@ test('app.js initializes, renders all views, and completes full card & review li
     assert.ok(markdownToHtml('==重点==').includes('cloze-mask'));
     await toggleTheme();
     assert.equal(document.documentElement.dataset.theme, 'dark');
+    assert.equal($('#themeColorMeta').attributes.content, '#0D1020');
     await toggleTheme();
     assert.equal(document.documentElement.dataset.theme, 'light');
+    assert.equal($('#themeColorMeta').attributes.content, '#EEF0FF');
+    view = 'settings';
+    await render();
+    assert.ok($('#viewRoot').innerHTML.includes('install-pwa') || $('#viewRoot').innerHTML.includes('refresh-pwa-cache'));
     await openCardDialog();
     assert.equal($('#cardMetaFold').open, false);
     insertMarkdownFormat('bold');
@@ -216,6 +226,18 @@ test('app.js initializes, renders all views, and completes full card & review li
     assert.ok($('#viewRoot').innerHTML.includes('preset-curve-card'));
     assert.ok($('#viewRoot').innerHTML.includes('defaultStudyMethodSelect'));
     assert.ok($('#viewRoot').innerHTML.includes('dailyLimitSelect'));
+    assert.ok($('#viewRoot').innerHTML.includes('couchRememberCheck'));
+    saveVerifiedCouchCreds({ url: 'https://db.example.com', name: 'studystyle', user: 'alice', password: 'secret-pass-value', autoConnect: true });
+    await render();
+    const settingsHtml = $('#viewRoot').innerHTML;
+    assert.ok(settingsHtml.includes('value="https://db.example.com"'));
+    assert.ok(settingsHtml.includes('value="secret-pass-value"'));
+    assert.ok(settingsHtml.includes('forget-couch'));
+    assert.ok(!localStorage.getItem(LOCAL_KEY).includes('secret-pass-value'), 'CouchDB 密码不得写入业务同步库');
+    await disconnectCouch();
+    assert.equal(loadSavedCouchCreds().autoConnect, false);
+    await forgetSavedCouch();
+    assert.equal(loadSavedCouchCreds(), null);
     await balanceOverdueNow();
     await openNotebookDialog();
     $('#notebookNameInput').value = '高等数学';

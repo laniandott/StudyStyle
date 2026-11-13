@@ -6,13 +6,28 @@ import Domain from './domain.cjs';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
-const publicFiles = new Set(['index.html', 'styles.css', 'app.js', 'domain.cjs', 'favicon.svg', 'icon.svg']);
+const publicFiles = new Set([
+  'index.html',
+  'styles.css',
+  'app.js',
+  'domain.cjs',
+  'manifest.webmanifest',
+  'sw.js',
+  'favicon.svg',
+  'icon.svg',
+  'apple-touch-icon.png',
+  'icon-192.png',
+  'icon-512.png',
+  'icon-maskable-512.png'
+]);
 const mime = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.cjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.png': 'image/png',
   '.svg': 'image/svg+xml'
 };
 
