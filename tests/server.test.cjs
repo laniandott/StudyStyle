@@ -354,7 +354,8 @@ test('响应包含 5 个安全响应头', async t => {
     assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
     assert.ok(res.headers.get('permissions-policy'), '缺少 Permissions-Policy');
   }
-  assert.match(api.headers.get('content-security-policy'), /https:\/\/cdn\.jsdelivr\.net/);
+  assert.match(api.headers.get('content-security-policy'), /script-src 'self'/);
+  assert.equal(api.headers.get('content-security-policy').includes('jsdelivr'), false, 'script-src 不得依赖外部 CDN');
 });
 
 test('正常请求日志包含路径和状态码，不包含学习文档内容', async t => {
@@ -565,4 +566,526 @@ test('测试全部使用临时目录，项目 data/ 不被写入', () => {
   if (!fs.existsSync(dataDir)) return;
   const entries = fs.readdirSync(dataDir);
   assert.deepEqual(entries.filter(name => name.includes('.corrupt.')), []);
+});
+
+
+test('增量同步：GET ?since=<rev> 无变更返回 unchanged，有变更仅返回变更文档', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  await putJson(srv.base, { docs: [card('c1'), card('c2')] });
+  const init = await (await fetch(`${srv.base}/api/store`)).json();
+
+  const sameRes = await (await fetch(`${srv.base}/api/store?since=${encodeURIComponent(init.rev)}`)).json();
+  assert.equal(sameRes.incremental, true);
+  assert.equal(sameRes.unchanged, true);
+  assert.deepEqual(sameRes.changes, []);
+  assert.equal(sameRes.docs, undefined);
+
+  await putJson(srv.base, {
+    mode: 'delta',
+    base_rev: init.rev,
+    docs: [card('c2', { title: '已更新 c2', updated_at: '2026-06-01T00:00:00.000Z' })]
+  });
+
+  const deltaRes = await (await fetch(`${srv.base}/api/store?since=${encodeURIComponent(init.rev)}`)).json();
+  assert.equal(deltaRes.incremental, true);
+  assert.equal(deltaRes.unchanged, false);
+  assert.deepEqual(deltaRes.changes.map(d => d._id), ['c2']);
+  assert.equal(deltaRes.changes[0].title, '已更新 c2');
+
+  const full = await (await fetch(`${srv.base}/api/store`)).json();
+  assert.deepEqual(full.docs.map(d => d._id).sort(), ['c1', 'c2'], 'delta 更新不能抹掉未包含的 c1');
+});
+
+test('增量同步：PUT mode=delta 校验 base_rev 且冲突时仅回传变化集', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const badDelta = await putJson(srv.base, { mode: 'delta', docs: [card('c1')] });
+  assert.equal(badDelta.status, 400);
+
+  await putJson(srv.base, { docs: [card('c1'), card('c2')] });
+  const { rev } = await (await fetch(`${srv.base}/api/store`)).json();
+
+  await putJson(srv.base, { mode: 'delta', base_rev: rev, docs: [card('remote-only')] });
+
+  const conflictRes = await putJson(srv.base, { mode: 'delta', base_rev: rev, docs: [card('local-only')] });
+  assert.equal(conflictRes.status, 200);
+  const conflictBody = await conflictRes.json();
+  assert.equal(conflictBody.merged, true);
+  assert.equal(conflictBody.mode, 'delta');
+  assert.ok(Array.isArray(conflictBody.changes));
+  const changeIds = conflictBody.changes.map(d => d._id).sort();
+  assert.deepEqual(changeIds, ['local-only', 'remote-only'], '冲突增量仅含两次变化涉及的文档');
+  assert.equal(conflictBody.docs, undefined);
+});
+
+
+test('模块化静态资源目录（src/ 与 styles/）白名单可访问且禁止越权路径', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const paths = [
+    'styles/tokens.css',
+    'styles/layout.css',
+    'styles/components.css',
+    'styles/views.css',
+    'styles/glass-responsive.css',
+    'src/state.js',
+    'src/store.js',
+    'src/views.js',
+    'src/review.js',
+    'app.js'
+  ];
+  for (const rel of paths) {
+    const res = await fetch(`${srv.base}/${rel}`);
+    assert.equal(res.status, 200, `${rel} 应返回 200`);
+  }
+  assert.equal((await fetch(`${srv.base}/../package.json`)).status, 404);
+  assert.equal((await fetch(`${srv.base}/src/not-exist.js`)).status, 404);
+});
+
+test('服务端 CouchDB 安全代理：支持 STORE_TOKEN 校验、注入上游凭据且不泄露密码', async t => {
+  const { createServer: createHttpServer } = require('node:http');
+  const seen = [];
+  const mockCouch = createHttpServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization || '', body });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'ETag': '"1-mock"' });
+      res.end(JSON.stringify({ db_name: 'studystyle', ok: true, id: 'probe1', rev: '1-mock' }));
+    });
+  });
+  await new Promise(r => mockCouch.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise(r => mockCouch.close(r)));
+  const couchPort = mockCouch.address().port;
+
+  const srv = await startServer({
+    storeToken: 'proxy-secret-token',
+    couchProxyUrl: `http://127.0.0.1:${couchPort}`,
+    couchProxyUser: 'couch-user',
+    couchProxyPassword: 'couch-password-xyz',
+    couchProxyDb: 'my_notes'
+  });
+  t.after(() => srv.close());
+
+  // 未带 STORE_TOKEN 被拒 401
+  assert.equal((await fetch(`${srv.base}/api/couch/status`)).status, 401);
+  assert.equal((await fetch(`${srv.base}/api/couch/db/my_notes`)).status, 401);
+
+  // status 返回 enabled 与 db，但绝对不含密码
+  const statusRes = await fetch(`${srv.base}/api/couch/status`, {
+    headers: { 'X-Store-Token': 'proxy-secret-token' }
+  });
+  assert.equal(statusRes.status, 200);
+  const statusText = await statusRes.text();
+  const statusJson = JSON.parse(statusText);
+  assert.deepEqual({ ok: statusJson.ok, enabled: statusJson.enabled, db: statusJson.db }, { ok: true, enabled: true, db: 'my_notes' });
+  assert.equal(statusText.includes('couch-password-xyz'), false);
+
+  // 代理请求注入 Basic Auth 并透传路径与 query
+  const proxyPut = await fetch(`${srv.base}/api/couch/db/my_notes/probe1?batch=ok`, {
+    method: 'PUT',
+    headers: {
+      'X-Store-Token': 'proxy-secret-token',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ _id: 'probe1', type: 'probe' })
+  });
+  assert.equal(proxyPut.status, 200);
+  const expectedAuth = `Basic ${Buffer.from('couch-user:couch-password-xyz').toString('base64')}`;
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, 'PUT');
+  assert.equal(seen[0].url, '/my_notes/probe1?batch=ok');
+  assert.equal(seen[0].auth, expectedAuth);
+
+  // 路径穿越被拦截
+  const badPath = await fetch(`${srv.base}/api/couch/db/my_notes/..%2Fsecret`, {
+    headers: { 'X-Store-Token': 'proxy-secret-token' }
+  });
+  assert.equal(badPath.status, 400);
+
+  // %2F 编码文档 ID 透传不被破坏
+  const encodedDoc = await fetch(`${srv.base}/api/couch/db/my_notes/folder%2Fdoc1`, {
+    headers: { 'X-Store-Token': 'proxy-secret-token' }
+  });
+  assert.equal(encodedDoc.status, 200);
+  assert.equal(seen[1].url, '/my_notes/folder%2Fdoc1');
+
+  // 单库沙箱隔离：禁止越权访问 /_all_dbs、/_users、非配置数据库，以及整库删除/覆写与管理端点
+  for (const forbidden of [
+    '/api/couch/db/_all_dbs',
+    '/api/couch/db/_users/org.couchdb.user:admin',
+    '/api/couch/db/other_db/doc1',
+    '/api/couch/db/my_notes/_security',
+    '/api/couch/db/my_notes/_purge'
+  ]) {
+    const res = await fetch(`${srv.base}${forbidden}`, {
+      headers: { 'X-Store-Token': 'proxy-secret-token' }
+    });
+    assert.equal(res.status, 403, `越权路径 ${forbidden} 必须返回 403`);
+  }
+  for (const dangerousMethod of ['DELETE', 'PUT']) {
+    const res = await fetch(`${srv.base}/api/couch/db/my_notes`, {
+      method: dangerousMethod,
+      headers: { 'X-Store-Token': 'proxy-secret-token' }
+    });
+    assert.equal(res.status, 403, `代理不得允许整库 ${dangerousMethod} /my_notes`);
+  }
+
+  // COUCH_PROXY_URL 末尾已带数据库名时自动去重，不拼出 /my_notes/my_notes
+  const srvWithDbInUrl = await startServer({
+    storeToken: 'proxy-secret-token',
+    couchProxyUrl: `http://127.0.0.1:${couchPort}/my_notes`
+  });
+  t.after(() => srvWithDbInUrl.close());
+  const statusAutoDb = await (await fetch(`${srvWithDbInUrl.base}/api/couch/status`, {
+    headers: { 'X-Store-Token': 'proxy-secret-token' }
+  })).json();
+  assert.equal(statusAutoDb.db, 'my_notes');
+  const dedupRes = await fetch(`${srvWithDbInUrl.base}/api/couch/db/my_notes/doc-dedup`, {
+    headers: { 'X-Store-Token': 'proxy-secret-token' }
+  });
+  assert.equal(dedupRes.status, 200);
+  assert.equal(seen[seen.length - 1].url, '/my_notes/doc-dedup');
+});
+
+test('服务端 CouchDB 代理兼容 longpoll 长连接与流式透传，不因短超时掐断 _changes', async t => {
+  const { createServer: createHttpServer } = require('node:http');
+  const mockCouch = createHttpServer((req, res) => {
+    if (req.url.includes('_changes')) {
+      setTimeout(() => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ results: [{ id: 'c1', seq: '2-abc' }], last_seq: '2-abc' }));
+      }, 180);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{}');
+  });
+  await new Promise(r => mockCouch.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise(r => mockCouch.close(r)));
+
+  const srv = await startServer({
+    couchProxyUrl: `http://127.0.0.1:${mockCouch.address().port}`,
+    couchProxyTimeoutMs: 60
+  });
+  t.after(() => srv.close());
+
+  // 即使基础 timeout=60ms，_changes?feed=longpoll 仍应自动放宽超时窗口并完整流式返回
+  const lp = await fetch(`${srv.base}/api/couch/db/studystyle/_changes?feed=longpoll&timeout=500`);
+  assert.equal(lp.status, 200);
+  const lpBody = await lp.json();
+  assert.equal(lpBody.last_seq, '2-abc');
+});
+
+test('CSP script-src 禁止 unsafe-inline，且 STORE_TOKEN 连续鉴权失败触发 429 限流', async t => {
+  const srv = await startServer({
+    storeToken: 'top-secret-token',
+    authFailLimit: 3,
+    authWindowMs: 5000
+  });
+  t.after(() => srv.close());
+
+  const page = await fetch(`${srv.base}/`);
+  assert.equal(page.status, 200);
+  const csp = page.headers.get('content-security-policy') || '';
+  const scriptSrc = csp.split(';').map(s => s.trim()).find(s => s.startsWith('script-src ')) || '';
+  assert.equal(scriptSrc, "script-src 'self'", 'script-src 仅允许同源 self 且不得包含 unsafe-inline 或外部 CDN');
+  const pouchBundleRes = await fetch(`${srv.base}/vendor/pouchdb.min.js`);
+  assert.equal(pouchBundleRes.status, 200);
+  assert.match(String(pouchBundleRes.headers.get('content-type') || ''), /javascript/);
+
+  // 连续 3 次错误令牌均应返回 401
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch(`${srv.base}/api/store`, { headers: { 'X-Store-Token': 'wrong' } });
+    assert.equal(res.status, 401);
+  }
+  // 第 4 次即使携带错误（或被暂时锁定），同一 IP 在窗口内应被限流为 429 + Retry-After
+  const blocked = await fetch(`${srv.base}/api/store`, { headers: { 'X-Store-Token': 'top-secret-token' } });
+  assert.equal(blocked.status, 429);
+  assert.ok(Number(blocked.headers.get('retry-after')) >= 1);
+
+  // 未锁定时携带正确令牌应清零失败计数（新开一实例验证）
+  const srv2 = await startServer({ storeToken: 'reset-ok', authFailLimit: 2, authWindowMs: 5000 });
+  t.after(() => srv2.close());
+  assert.equal((await fetch(`${srv2.base}/api/store`, { headers: { 'X-Store-Token': 'bad' } })).status, 401);
+  assert.equal((await fetch(`${srv2.base}/api/store`, { headers: { 'X-Store-Token': 'reset-ok' } })).status, 200);
+  assert.equal((await fetch(`${srv2.base}/api/store`, { headers: { 'X-Store-Token': 'bad' } })).status, 401);
+  assert.equal((await fetch(`${srv2.base}/api/store`, { headers: { 'X-Store-Token': 'reset-ok' } })).status, 200);
+});
+
+test('增量日志持久化：服务端重启后 ?since=<rev> 仍命中增量变化', async t => {
+  const dataDir = await makeDataDir();
+  const srv1 = await startServer({ dataDir });
+  const r1 = await (await fetch(`${srv1.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ docs: [{ _id: 'c1', type: 'card', title: 'first', outline: '- a' }] })
+  })).json();
+  const r2 = await (await fetch(`${srv1.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      base_rev: r1.rev,
+      mode: 'delta',
+      docs: [{ _id: 'c2', type: 'card', title: 'second', outline: '- b', updated_at: '2026-02-01T00:00:00.000Z' }]
+    })
+  })).json();
+  await srv1.close();
+
+  assert.equal(fs.existsSync(path.join(dataDir, 'studystyle-delta.json')), true, '应生成 sidecar 增量日志');
+
+  // 使用同一 dataDir 重启全新实例
+  const srv2 = await startServer({ dataDir });
+  t.after(() => srv2.close());
+  const sinceRes = await (await fetch(`${srv2.base}/api/store?since=${encodeURIComponent(r1.rev)}`)).json();
+  assert.equal(sinceRes.rev, r2.rev);
+  assert.equal(sinceRes.incremental, true, '重启后 ?since=<rev> 不应退化为全量拉取');
+  assert.equal(sinceRes.unchanged, false);
+  assert.deepEqual(sinceRes.changes.map(d => d._id), ['c2']);
+});
+
+test('HTTP gzip 压缩传输大响应且 HEAD 不发空体异常', async t => {
+  const http = require('node:http');
+  const zlib = require('node:zlib');
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const bigDocs = Array.from({ length: 12 }, (_, i) => ({
+    _id: `card:gz-${i}`,
+    type: 'card',
+    title: `压缩测试卡片 ${i}`,
+    outline: '主动回忆 '.repeat(25)
+  }));
+  const putRes = await fetch(`${srv.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ docs: bigDocs })
+  });
+  assert.equal(putRes.status, 200);
+
+  const gzResp = await new Promise((resolve, reject) => {
+    const req = http.request(`${srv.base}/api/store`, { headers: { 'Accept-Encoding': 'gzip' } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, raw: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(gzResp.status, 200);
+  assert.equal(gzResp.headers['content-encoding'], 'gzip');
+  assert.match(String(gzResp.headers.vary || ''), /Accept-Encoding/i);
+  const decompressed = JSON.parse(zlib.gunzipSync(gzResp.raw).toString('utf8'));
+  assert.equal(decompressed.docs.length, 12);
+
+  const headResp = await fetch(`${srv.base}/api/store`, { method: 'HEAD', headers: { 'Accept-Encoding': 'gzip' } });
+  assert.equal(headResp.status, 200);
+  assert.equal(headResp.headers.get('content-encoding'), null);
+});
+
+test('静态资源返回弱 ETag 与 no-cache，命中 If-None-Match 返回 304', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const first = await fetch(`${srv.base}/app.js`);
+  assert.equal(first.status, 200);
+  const etag = first.headers.get('etag');
+  assert.match(String(etag || ''), /^W\/"\d+-\d+"$/);
+  assert.equal(first.headers.get('cache-control'), 'no-cache');
+
+  const second = await fetch(`${srv.base}/app.js`, { headers: { 'If-None-Match': etag } });
+  assert.equal(second.status, 304);
+  assert.equal(second.headers.get('etag'), etag);
+  assert.equal(await second.text(), '');
+
+  const apiRes = await fetch(`${srv.base}/api/store`);
+  assert.equal(apiRes.headers.get('cache-control'), 'no-store');
+});
+
+test('trustProxy 开启后按 X-Forwarded-For 最右端真实代理 IP 隔离鉴权限流', async t => {
+  const srv = await startServer({ storeToken: 'secret-tok', trustProxy: true, authFailLimit: 3, authWindowMs: 5000 });
+  t.after(() => srv.close());
+
+  // 同一攻击者不断伪造最左侧 IP，但直接相连反代追加的最右 IP (203.0.113.9) 不变
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch(`${srv.base}/api/store`, {
+      headers: {
+        'X-Store-Token': 'wrong-tok',
+        'X-Forwarded-For': `10.0.0.${i + 1}, 203.0.113.9`
+      }
+    });
+    assert.equal(res.status, 401);
+  }
+
+  // 第 4 次即便换一个新的左端伪造 IP，仍须触发 429 限流
+  const throttled = await fetch(`${srv.base}/api/store`, {
+    headers: {
+      'X-Store-Token': 'wrong-tok',
+      'X-Forwarded-For': '9.9.9.9, 203.0.113.9'
+    }
+  });
+  assert.equal(throttled.status, 429);
+
+  // 另一个真实客户端 IP 不受同一 Caddy 网桥牵连，凭正确令牌正常放行
+  const otherClient = await fetch(`${srv.base}/api/store`, {
+    headers: {
+      'X-Store-Token': 'secret-tok',
+      'X-Forwarded-For': '198.51.100.7'
+    }
+  });
+  assert.equal(otherClient.status, 200);
+});
+
+test('PUT /api/store 拒绝包含 __proto__/constructor/prototype 原型污染键的载荷', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const evilPayload = '{"docs":[{"_id":"card:evil","type":"card","title":"x","outline":"y","__proto__":{"polluted":"yes"}}]}';
+  const res = await fetch(`${srv.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: evilPayload
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.match(String(body.error || ''), /非法原型键/);
+  assert.equal(({}).polluted, undefined);
+});
+
+test('墓碑文档在落盘时自动裁剪冗余内容字段且保留删除元数据', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const res = await fetch(`${srv.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      docs: [
+        {
+          _id: 'card:keep',
+          type: 'card',
+          title: '保留卡',
+          outline: '- 核心要点',
+          updated_at: '2026-02-01T00:00:00.000Z'
+        },
+        {
+          _id: 'card:gone',
+          _deleted: true,
+          _rev: '2-deadbeef',
+          type: 'card',
+          title: '不应落盘的冗余标题',
+          outline: '不应落盘的长大纲 '.repeat(40),
+          recall_draft: '不应落盘的草稿',
+          notebook: '高等数学',
+          updated_at: '2026-02-02T00:00:00.000Z',
+          deleted_at: '2026-02-02T00:00:00.000Z'
+        }
+      ]
+    })
+  });
+  assert.equal(res.status, 200);
+
+  const onDisk = JSON.parse(await fsp.readFile(srv.storeFile, 'utf8'));
+  const tombstone = onDisk.docs.find(d => d._id === 'card:gone');
+  const live = onDisk.docs.find(d => d._id === 'card:keep');
+  assert.deepEqual(tombstone, {
+    _id: 'card:gone',
+    _deleted: true,
+    _rev: '2-deadbeef',
+    updated_at: '2026-02-02T00:00:00.000Z',
+    deleted_at: '2026-02-02T00:00:00.000Z'
+  });
+  assert.equal(live.title, '保留卡');
+  assert.equal(live.outline, '- 核心要点');
+});
+
+test('read 缓存命中时正常返回 ?since= 且外部改写或损坏磁盘文件立即失效', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const putRes = await fetch(`${srv.base}/api/store`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      docs: [{ _id: 'card:cache-1', type: 'card', title: '缓存初始卡', outline: '- a' }]
+    })
+  });
+  assert.equal(putRes.status, 200);
+  const { rev: rev1 } = await putRes.json();
+
+  // 1) 同版本与 r0 增量查询（命中内存快照缓存）
+  const sameRes = await fetch(`${srv.base}/api/store?since=${encodeURIComponent(rev1)}`);
+  assert.equal(sameRes.status, 200);
+  const sameBody = await sameRes.json();
+  assert.equal(sameBody.incremental, true);
+  assert.equal(sameBody.unchanged, true);
+  assert.equal(sameBody.rev, rev1);
+
+  const deltaRes = await fetch(`${srv.base}/api/store?since=r0`);
+  assert.equal(deltaRes.status, 200);
+  const deltaBody = await deltaRes.json();
+  assert.equal(deltaBody.incremental, true);
+  assert.equal(deltaBody.changes.some(d => d._id === 'card:cache-1'), true);
+
+  // 2) 外部直接改写磁盘上的 studystyle-db.json 后，下一次读取必须失效缓存
+  await fsp.writeFile(srv.storeFile, JSON.stringify({
+    app: 'StudyStyle',
+    updated_at: '2026-03-01T00:00:00.000Z',
+    rev: 'r99',
+    docs: [{ _id: 'card:ext-edit', type: 'card', title: '外部直接替换后的卡片内容-确保长度变化' }]
+  }), 'utf8');
+
+  const afterExternalRes = await fetch(`${srv.base}/api/store?since=${encodeURIComponent(rev1)}`);
+  assert.equal(afterExternalRes.status, 200);
+  const afterExternalBody = await afterExternalRes.json();
+  assert.equal(afterExternalBody.rev, 'r99');
+  assert.equal(afterExternalBody.incremental, false);
+  assert.equal(afterExternalBody.docs.some(d => d._id === 'card:ext-edit'), true);
+
+  // 3) 外部把磁盘文件写坏后，读请求必须感知并隔离坏文件返回 500，绝不能返吐旧缓存
+  await fsp.writeFile(srv.storeFile, '{corrupt-json', 'utf8');
+  const corruptRes = await fetch(`${srv.base}/api/store`);
+  assert.equal(corruptRes.status, 500);
+  const files = await fsp.readdir(srv.dataDir);
+  assert.ok(files.some(name => name.startsWith('studystyle-db.json.corrupt.')));
+});
+
+test('服务端 CouchDB 代理支持反代子路径、清洗 URL 参数并拒绝系统保留库名', async t => {
+  const { createServer: createHttpServer } = require('node:http');
+  const seen = [];
+  const mockCouch = createHttpServer((req, res) => {
+    seen.push(req.url);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  await new Promise(r => mockCouch.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise(r => mockCouch.close(r)));
+  const couchPort = mockCouch.address().port;
+
+  // 1) COUCH_PROXY_URL 带查询参数/锚点 + 子路径前缀 + 显式 COUCH_PROXY_DB 时应剥离噪声并保留子路径
+  const srvSubpath = await startServer({
+    couchProxyUrl: `http://127.0.0.1:${couchPort}/couch/?ignored=1#hash`,
+    couchProxyDb: 'my_notes'
+  });
+  t.after(() => srvSubpath.close());
+  const st = await (await fetch(`${srvSubpath.base}/api/couch/status`)).json();
+  assert.deepEqual({ enabled: st.enabled, db: st.db }, { enabled: true, db: 'my_notes' });
+  const r = await fetch(`${srvSubpath.base}/api/couch/db/my_notes/doc-sub`);
+  assert.equal(r.status, 200);
+  assert.equal(seen[0], '/couch/my_notes/doc-sub');
+
+  // 2) 非法保留库名（如 _users）必须自动禁用代理而非暴露系统库
+  const srvReserved = await startServer({
+    couchProxyUrl: `http://127.0.0.1:${couchPort}`,
+    couchProxyDb: '_users'
+  });
+  t.after(() => srvReserved.close());
+  const reservedStatus = await (await fetch(`${srvReserved.base}/api/couch/status`)).json();
+  assert.equal(reservedStatus.enabled, false);
+  const reservedProxy = await fetch(`${srvReserved.base}/api/couch/db/_users/doc1`);
+  assert.equal(reservedProxy.status, 503);
 });

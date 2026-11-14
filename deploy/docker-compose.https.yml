@@ -1,0 +1,47 @@
+services:
+  studystyle:
+    build: ..
+    container_name: studystyle
+    restart: unless-stopped
+    expose:
+      - "3880"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3880"
+      DATA_DIR: "/app/data"
+      TZ: "${TZ:-Asia/Shanghai}"
+      TRUST_PROXY: "1"
+      STORE_TOKEN: "${STORE_TOKEN:-}"
+      COUCH_PROXY_URL: "${COUCH_PROXY_URL:-}"
+      COUCH_PROXY_USER: "${COUCH_PROXY_USER:-}"
+      COUCH_PROXY_PASSWORD: "${COUCH_PROXY_PASSWORD:-}"
+      COUCH_PROXY_DB: "${COUCH_PROXY_DB:-studystyle}"
+    volumes:
+      - ../data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3880/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: studystyle-caddy
+    restart: unless-stopped
+    depends_on:
+      studystyle:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      STUDYSTYLE_DOMAIN: "${STUDYSTYLE_DOMAIN:-localhost}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

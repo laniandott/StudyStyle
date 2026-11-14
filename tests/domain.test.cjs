@@ -171,3 +171,61 @@ test('normalizeNotebook and collectNotebooks group cards by subject and count du
   assert.deepEqual({ total: net.total, due: net.due }, { total: 1, due: 1 });
   assert.deepEqual({ total: eng.total, due: eng.due, color: eng.color }, { total: 0, due: 0, color: 'rose' });
 });
+
+test('nextAdaptiveSchedule adjusts stability, difficulty, lapses, and overdue bonus continuously', () => {
+  const firstHigh = Domain.nextAdaptiveSchedule({}, 90, 'hold', '2026-11-11');
+  assert.ok(firstHigh.days >= 4 && firstHigh.days <= 7);
+  assert.ok(firstHigh.difficulty < 5);
+  assert.equal(firstHigh.reps, 1);
+  assert.equal(firstHigh.lapses, 0);
+
+  const firstLow = Domain.nextAdaptiveSchedule({ stability: 15, difficulty: 5, reps: 3, interval_index: 3, last_reviewed_at: '2026-10-27T12:00:00Z' }, 20, 'hold', '2026-11-11');
+  assert.ok(firstLow.stability < 15, '遗忘时应下调稳定度而不是永远原地死扛');
+  assert.ok(firstLow.difficulty > 5, '低分应提升卡片难度系数');
+  assert.equal(firstLow.lapses, 1);
+
+  const resetLow = Domain.nextAdaptiveSchedule({ stability: 20, difficulty: 6, reps: 4, interval_index: 4, last_reviewed_at: '2026-10-20T12:00:00Z' }, 10, 'reset', '2026-11-11');
+  assert.equal(resetLow.days, 1);
+  assert.equal(resetLow.intervalIndex, 0);
+  assert.equal(resetLow.lapses, 1);
+
+  const secondEasy = Domain.nextAdaptiveSchedule({ stability: 6, difficulty: 4, reps: 1, interval_index: 2, last_reviewed_at: '2026-11-05T12:00:00Z' }, 95, 'hold', '2026-11-11');
+  assert.ok(secondEasy.days > 10, '连续高分应按难度与间距稳步拉长间隔');
+  assert.equal(Domain.computeCardInterval({ next_interval_days: secondEasy.days, interval_index: 2 }, undefined, 'adaptive'), secondEasy.days);
+
+  const borderline = Domain.nextAdaptiveSchedule({ stability: 10, difficulty: 5, reps: 2, interval_index: 2, last_reviewed_at: '2026-11-01T12:00:00Z' }, 45, 'hold', '2026-11-11');
+  assert.equal(borderline.lapses, 1, 'adaptive 模式默认及格线为 60%，45% 应判定未过线并记录遗忘');
+  assert.ok(borderline.stability < 10);
+});
+
+test('sortDueCards and pickRandomCard prioritize stubborn high-lapse cards', () => {
+  const tied = [
+    { _id: 'c1', latest_memory_score: 30, due_date: '2026-11-10', created_at: '2026-11-01', lapses: 0, difficulty: 5 },
+    { _id: 'c2', latest_memory_score: 30, due_date: '2026-11-10', created_at: '2026-11-02', lapses: 3, difficulty: 8.5 }
+  ];
+  assert.deepEqual(Domain.sortDueCards(tied).map(c => c._id), ['c2', 'c1'], '同记忆袋且同到期日时多次遗忘卡应优先出现');
+
+  // score=30 时无加权两者同权 4:4，rng=0.5 会命中第一张 c1；加权后 c2 权重达 4+6+1.75=11.75，0.5 必中 c2
+  assert.equal(Domain.pickRandomCard(tied, null, () => 0.5)._id, 'c2');
+});
+
+test('checkKeyTermHits avoids ASCII substring false positives and adaptive fuzzSeed spreads batch intervals', () => {
+  const chemOutline = '- 反应产生 ==O2== 与 ==ATP==';
+  const falsePositive = Domain.checkKeyTermHits(chemOutline, 'CO2 产生后没有atp变化');
+  assert.deepEqual(falsePositive.hits, ['ATP'], 'CO2 不应误命中 O2，中文旁路 atp 仍正常命中');
+  assert.deepEqual(falsePositive.missed, ['O2']);
+
+  const baseState = { stability: 10, difficulty: 5, reps: 2, interval_index: 2, last_reviewed_at: '2026-11-01T12:00:00Z' };
+  const daysSet = new Set(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(k =>
+    Domain.nextAdaptiveSchedule(baseState, 85, 'hold', '2026-11-11', Domain.DEFAULT_INTERVALS, { fuzzSeed: `card:${k}:2` }).days
+  ));
+  assert.ok(daysSet.size >= 2, 'fuzzSeed 应让同日同分数卡片产生轻微分流');
+});
+
+test('nextAdaptiveSchedule handles malformed last_reviewed_at without NaN poison', () => {
+  const dirtyCard = { stability: 8, difficulty: 5, reps: 2, interval_index: 2, last_reviewed_at: '2026-99-99T12:00:00Z' };
+  const result = Domain.nextAdaptiveSchedule(dirtyCard, 80, 'hold', '2026-11-14');
+  assert.ok(Number.isFinite(result.stability) && result.stability > 0);
+  assert.ok(Number.isInteger(result.days) && result.days >= 1);
+  assert.match(result.dueDate, /^\d{4}-\d{2}-\d{2}$/);
+});

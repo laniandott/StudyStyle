@@ -5,14 +5,21 @@ services:
       dockerfile: Dockerfile
     container_name: studystyle
     restart: unless-stopped
+    # 默认仅绑定本机回环地址，由宿主机的 Nginx/Caddy 反代提供 HTTPS；如需局域网直连可设 BIND_HOST=0.0.0.0
     ports:
-      - "3880:3880"
+      - "${BIND_HOST:-127.0.0.1}:3880:3880"
     environment:
       - NODE_ENV=production
       - HOST=0.0.0.0
       - PORT=3880
       - DATA_DIR=/app/data
-      - TZ=Asia/Shanghai
+      - TZ=${TZ:-Asia/Shanghai}
+      - TRUST_PROXY=${TRUST_PROXY:-0}
+      - STORE_TOKEN=${STORE_TOKEN:-}
+      - COUCH_PROXY_URL=${COUCH_PROXY_URL:-}
+      - COUCH_PROXY_USER=${COUCH_PROXY_USER:-}
+      - COUCH_PROXY_PASSWORD=${COUCH_PROXY_PASSWORD:-}
+      - COUCH_PROXY_DB=${COUCH_PROXY_DB:-studystyle}
     volumes:
       - ./data:/app/data
     healthcheck:

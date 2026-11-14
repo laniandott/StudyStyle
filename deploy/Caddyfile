@@ -1,0 +1,20 @@
+# StudyStyle HTTPS 反向代理模板（自动签发 HTTPS 证书，启用完整 PWA Service Worker 与桌面/手机安装）
+# 使用方式：修改 DOMAIN 为你的真实域名（如 notes.example.com），或留默认 localhost 用于本机自签验证：
+#   STUDYSTYLE_DOMAIN=notes.example.com docker compose -f deploy/docker-compose.https.yml up -d
+
+{$STUDYSTYLE_DOMAIN:localhost} {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    Referrer-Policy "no-referrer"
+    X-Content-Type-Options "nosniff"
+  }
+
+  reverse_proxy studystyle:3880
+}
+
+# 可选：如果同一台 VPS 上也部署了 CouchDB，可取消注释以下区块，通过同主域或独立子域名提供 HTTPS + CORS：
+# {$COUCH_DOMAIN:db.example.com} {
+#   reverse_proxy couchdb:5984
+# }

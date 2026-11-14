@@ -1,0 +1,344 @@
+/* =============================================================
+   StudyStyle · 视觉底座
+   规范：DESIGN-SYSTEM.md v1（方向：墨纸 · 靛蓝）
+   铁律一：一屏只有一种彩色 —— 靛蓝 --c-brand-500
+   铁律二：层级只靠 1px 边框 + 单一阴影 + 留白
+   铁律三：圆角 full(999px) 仅用于 状态点 / 等级 chip / 计数 pill / 进度条端点
+   组件层一律不写死 hex，颜色一律走 token
+   ============================================================= */
+
+/* ---- 通用工具类 ---- */
+.hidden {
+  display: none !important;
+}
+
+:root {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
+    "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC", "Source Han Sans SC",
+    "Microsoft YaHei", "Heiti SC", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Cascadia Mono", monospace;
+
+  /* ---- 品牌靛蓝 HSL 232° 62% ---- */
+  --c-brand-50: #F1F2FE;
+  --c-brand-100: #E3E5FD;
+  --c-brand-200: #C8CCFA;
+  --c-brand-300: #9DA4F3;
+  --c-brand-400: #737CE9;
+  --c-brand-500: #4630CF;
+  --c-brand-600: #3A26B0;
+  --c-brand-700: #2F1E8C;
+  --c-brand-800: #25166B;
+  --c-brand-900: #1B0F4D;
+
+  /* ---- 中性阶 ---- */
+  --c-bg: #F7F8FA;
+  --c-surface: #FFFFFF;
+  --c-surface-2: #F1F2F6;
+  --c-surface-3: #EAECF1;
+  --c-border: #E3E5EA;
+  --c-border-strong: #D2D5DD;
+  --c-border-brand: #C8CCFA;
+  --c-text: #14161C;
+  --c-text-2: #4A4F5C;
+  --c-text-3: #7B8090;
+  --c-text-disabled: #A8ACB8;
+
+  /* ---- 语义色（每屏 ≤1 处） ---- */
+  --c-success: #1F7A56;
+  --c-success-bg: #E6F4EE;
+  --c-warning: #9A6410;
+  --c-warning-bg: #FBF2E2;
+  --c-danger: #C0392B;
+  --c-danger-hover: #A82F23;
+  --c-danger-on: #FFFFFF;
+  --c-danger-bg: #FBEBE9;
+  --c-info: #3A26B0;
+  --c-info-bg: #EEF0FC;
+
+  /* ---- 焦点双环（浅色用 brand-100，深色用 brand-300） ---- */
+  --c-focus-ring: var(--c-brand-100);
+
+  /* ---- 间距刻度 4/8pt ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+  --sp-20: 80px;
+
+  /* ---- 圆角 6 档 ---- */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 999px;
+
+  /* ---- 阴影 3 档（无彩色阴影、无 inset 高光） ---- */
+  --shadow-xs: 0 1px 2px rgba(16, 18, 28, 0.05);
+  --shadow-sm: 0 2px 6px rgba(16, 18, 28, 0.07);
+  --shadow-lg: 0 24px 64px rgba(16, 18, 28, 0.18);
+
+  /* ---- 6 级记忆等级：L1 中性灰 + L2–L6 靛蓝明度阶梯 ---- */
+  --bag-l1-dot: #9AA0AE;
+  --bag-l1-bg: #F1F2F5;
+  --bag-l1-fg: #5C6270;
+  --bag-l2-dot: #8579D8;
+  --bag-l2-bg: #F0EFFA;
+  --bag-l2-fg: #4A3FA8;
+  --bag-l3-dot: #6959CF;
+  --bag-l3-bg: #EAEAF8;
+  --bag-l3-fg: #443AB0;
+  --bag-l4-dot: #4C39C6;
+  --bag-l4-bg: #E5E4F5;
+  --bag-l4-fg: #3A2CA0;
+  --bag-l5-dot: #4030A6;
+  --bag-l5-bg: #DFDFEF;
+  --bag-l5-fg: #2F2382;
+  --bag-l6-dot: #342786;
+  --bag-l6-bg: #DAD9ED;
+  --bag-l6-fg: #241B68;
+
+  /* ---- 5 档评分梯度（与 L2–L6 同色相） ---- */
+  --score-1: #8579D8;
+  --score-2: #6959CF;
+  --score-3: #4C39C6;
+  --score-4: #4030A6;
+  --score-5: #342786;
+
+  /* ---- 布局尺寸 ---- */
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+  --content-max: 1200px;
+  --reading-max: 760px;
+  --dialog-w: min(720px, calc(100vw - 32px));
+
+  /* ---- iOS 透明液态玻璃质感（Liquid Glass） ---- */
+  --glass-bg: rgba(255, 255, 255, 0.36);
+  --glass-bg-elevated: rgba(255, 255, 255, 0.56);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.22);
+  --glass-border: rgba(255, 255, 255, 0.82);
+  --glass-highlight: inset 0 1.5px 1px rgba(255, 255, 255, 0.92), inset 0 -1px 1px rgba(255, 255, 255, 0.28);
+  --glass-blur: blur(10px) saturate(165%);
+  --glass-shadow: 0 10px 30px rgba(70, 48, 207, 0.08), 0 2px 8px rgba(16, 24, 40, 0.05);
+  --ambient-bg:
+    radial-gradient(880px 580px at 10% -4%, rgba(99, 102, 241, 0.26), transparent 58%),
+    radial-gradient(780px 560px at 92% 10%, rgba(56, 189, 248, 0.24), transparent 56%),
+    radial-gradient(760px 540px at 72% 94%, rgba(192, 132, 252, 0.22), transparent 58%),
+    radial-gradient(600px 460px at 22% 78%, rgba(52, 211, 153, 0.14), transparent 55%),
+    linear-gradient(155deg, #EEF2FF 0%, #E7EEFA 48%, #F3EFFE 100%);
+}
+
+[data-theme="dark"] {
+  /* 品牌色相不变，只把「浅底/深字」反过来：选中底改深靛蓝，文字改亮靛蓝 */
+  --c-brand-50: #222338;
+  --c-brand-100: #2A2C4E;
+  --c-brand-200: #3A3F6E;
+  --c-brand-700: #B7BCFA;
+
+  --c-bg: #0E0F14;
+  --c-surface: #171922;
+  --c-surface-2: #1F222D;
+  --c-surface-3: #262A37;
+  --c-border: #2B2F3C;
+  --c-border-strong: #3A3F4F;
+  --c-border-brand: #737CE9;
+  --c-text: #ECEEF3;
+  --c-text-2: #A8AEBD;
+  --c-text-3: #79808F;
+  --c-text-disabled: #5C6270;
+
+  --c-success: #5FD3A4;
+  --c-success-bg: #16302A;
+  --c-warning: #F0B85C;
+  --c-warning-bg: #332914;
+  --c-danger: #F0867C;
+  --c-danger-hover: #E06A5E;
+  /* 深色模式 danger 底色偏亮，白字对比度仅 2.5:1，改用深色字提升至 7.9:1 */
+  --c-danger-on: #1B0F4D;
+  --c-danger-bg: #37191A;
+  --c-info: #9DA4F3;
+  --c-info-bg: #222338;
+
+  --c-focus-ring: var(--c-brand-300);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+  --bag-l1-dot: #8A90A0;
+  --bag-l1-bg: #232733;
+  --bag-l1-fg: #B9BFCB;
+  --bag-l2-dot: #8E93DE;
+  --bag-l2-bg: #222333;
+  --bag-l2-fg: #B9BEEE;
+  --bag-l3-dot: #9FA2E4;
+  --bag-l3-bg: #23253A;
+  --bag-l3-fg: #C6C8F2;
+  --bag-l4-dot: #B0B1EC;
+  --bag-l4-bg: #242842;
+  --bag-l4-fg: #D2D3F6;
+  --bag-l5-dot: #C2C2F2;
+  --bag-l5-bg: #262A4C;
+  --bag-l5-fg: #DEDEF9;
+  --bag-l6-dot: #D3D2F7;
+  --bag-l6-bg: #282C56;
+  --bag-l6-fg: #E8E8FC;
+
+  --score-1: #8E93DE;
+  --score-2: #9FA2E4;
+  --score-3: #B0B1EC;
+  --score-4: #C2C2F2;
+  --score-5: #D3D2F7;
+
+  /* ---- iOS 透明液态玻璃质感（深色模式） ---- */
+  --glass-bg: rgba(24, 28, 44, 0.34);
+  --glass-bg-elevated: rgba(28, 33, 52, 0.54);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.04);
+  --glass-border: rgba(255, 255, 255, 0.22);
+  --glass-highlight: inset 0 1px 1px rgba(255, 255, 255, 0.22), inset 0 -1px 1px rgba(255, 255, 255, 0.05);
+  --glass-blur: blur(11px) saturate(170%);
+  --glass-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  --ambient-bg:
+    radial-gradient(880px 580px at 12% -4%, rgba(79, 70, 229, 0.36), transparent 58%),
+    radial-gradient(780px 560px at 90% 10%, rgba(14, 165, 233, 0.24), transparent 56%),
+    radial-gradient(760px 540px at 76% 94%, rgba(139, 92, 246, 0.26), transparent 58%),
+    linear-gradient(155deg, #090B12 0%, #0F1424 52%, #0C0E18 100%);
+}
+
+/* ===================== 基础 ===================== */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 22px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  color: var(--c-text);
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+h3 {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--c-brand-700);
+}
+
+/* 数字统一等宽字形（分数 / 百分比 / 计数 / 计时器 / 间隔天数） */
+.queue-summary strong,
+.nav-count,
+.bag-link-count,
+.linear-progress-text strong,
+.band-zone-amount strong,
+.library-result-count,
+.history-score-pill strong,
+.score-percent,
+.fine-score output,
+.forecast-num,
+.review-pos-text,
+.review-timer,
+.count-pill,
+.preset-curve-card span,
+.queue-order {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-brand-500);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===================== 图标 ===================== */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-20 {
+  width: 20px;
+  height: 20px;
+}
+
+.icon-24 {
+  width: 24px;
+  height: 24px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+

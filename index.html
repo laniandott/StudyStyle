@@ -13,12 +13,20 @@
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles/tokens.css" />
+    <link rel="stylesheet" href="./styles/layout.css" />
+    <link rel="stylesheet" href="./styles/components.css" />
+    <link rel="stylesheet" href="./styles/views.css" />
+    <link rel="stylesheet" href="./styles/glass-responsive.css" />
     <script defer src="./domain.cjs"></script>
+    <script defer src="./src/state.js"></script>
+    <script defer src="./src/store.js"></script>
+    <script defer src="./src/views.js"></script>
+    <script defer src="./src/review.js"></script>
     <script defer src="./app.js"></script>
 
     <!-- 图标 sprite：24×24 网格 / 1.5px 线性描边 / round cap+join / fill:none / stroke:currentColor -->
-    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" class="svg-sprite-hidden" aria-hidden="true" focusable="false">
       <symbol id="i-logo" viewBox="0 0 64 64">
         <path d="M28.31 11.08 A21.25 21.25 0 0 1 52.93 28.31" fill="none" stroke="#9DA4F3" stroke-width="5.5" stroke-linecap="round"/>
         <path d="M51.96 39.26 A21.25 21.25 0 0 1 18.34 48.28" fill="none" stroke="#4630CF" stroke-width="5.5" stroke-linecap="round"/>
@@ -378,7 +386,7 @@
 
     <dialog id="reviewDialog" class="dialog review-dialog" aria-labelledby="reviewTitle">
       <div class="review-progress-track" id="reviewProgressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="第 1 / 1 张">
-        <div class="review-progress-fill" id="reviewProgressBar" style="width: 0%"></div>
+        <div class="review-progress-fill" id="reviewProgressBar"></div>
       </div>
       <form id="reviewForm" method="dialog">
         <div class="review-topline">
@@ -447,6 +455,7 @@
 
         <!-- 第 2 步：核对 -->
         <section class="answer-panel notebook-sheet hidden" id="answerPanel" tabindex="-1" aria-labelledby="answerHeading">
+          <div class="last-note-alert hidden" id="blankRecallWarning" role="status"></div>
           <div class="last-note-alert hidden" id="lastNoteAlert"></div>
           <div id="reviewAnswerContent">
             <div class="keyterm-check-bar hidden" id="keyTermCheckBar" aria-live="polite"></div>
@@ -519,7 +528,7 @@
         <div class="help-item"><span>大纲列表缩进 / 退格</span><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></div>
         <div class="help-item"><span>大纲加粗 / 挖空</span><kbd>Ctrl+B</kbd> / <kbd>Ctrl+M</kbd></div>
       </div>
-      <div class="status-box" style="margin-top: 14px">
+      <div class="status-box mt-35">
         <strong>标记词查漏：</strong>大纲中用 <code>**重点词**</code> 或 <code>==挖空词==</code> 标记的内容，可在核对时与回忆草稿做文本比对，并将漏词记入备注。命中数只用于定位遗漏，不能替代对结论、推理、条件和应用能力的判断。
       </div>
       <div class="dialog-foot">

@@ -85,7 +85,8 @@ class MockClassList {
 function createSandbox(options = {}) {
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const domainCode = fs.readFileSync(path.join(root, 'domain.cjs'), 'utf8');
-  const appCode = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  const clientFiles = ['src/state.js', 'src/store.js', 'src/views.js', 'src/review.js', 'app.js'];
+  const appCode = clientFiles.map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n');
 
   const elementsById = new Map();
   function getOrCreateEl(id) {
@@ -146,7 +147,8 @@ function createSandbox(options = {}) {
       url,
       method: (init.method || 'GET').toUpperCase(),
       body: init.body ? JSON.parse(init.body) : null,
-      headers: init.headers || {}
+      headers: init.headers || {},
+      keepalive: Boolean(init.keepalive)
     };
     fetchCalls.push(call);
     const override = options.onFetch ? await options.onFetch(call) : null;
@@ -158,6 +160,7 @@ function createSandbox(options = {}) {
     };
   };
 
+  const docListeners = {};
   const sandbox = {
     console,
     assert,
@@ -170,6 +173,8 @@ function createSandbox(options = {}) {
     URL: Object.assign(URL, { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} }),
     Element: class {},
     addEventListener() {},
+    navigator: { onLine: options.onLine !== false },
+    ...(options.indexedDB ? { indexedDB: options.indexedDB } : {}),
     localStorage: {
       getItem: (k) => storage.get(k) ?? null,
       setItem: (k, v) => storage.set(k, String(v)),
@@ -178,10 +183,11 @@ function createSandbox(options = {}) {
     fetch: fetchMock,
     document: {
       title: '',
+      visibilityState: 'visible',
       documentElement: { dataset: {} },
       head: { appendChild() {} },
       createElement: (tag) => getOrCreateEl('created:' + tag),
-      addEventListener() {},
+      addEventListener(type, fn) { (docListeners[type] ||= []).push(fn); },
       querySelector(sel) {
         if (sel.startsWith('#')) {
           const id = sel.slice(1);
@@ -205,6 +211,7 @@ function createSandbox(options = {}) {
     sandbox,
     storage,
     fetchCalls,
+    docListeners,
     el: id => elementsById.get(id),
     /* 在沙箱内执行表达式（可读写 app.js 的模块级 let 变量） */
     run: expr => vm.runInContext(expr, sandbox),
@@ -851,4 +858,800 @@ test('R21 回归测试全部使用临时目录，项目 data/ 不被写入', asy
   const dataDir = path.join(root, 'data');
   if (!fs.existsSync(dataDir)) return;
   assert.deepEqual(fs.readdirSync(dataDir).filter(name => name.includes('.corrupt.')), []);
+});
+
+
+test('R22 客户端增量 delta 同步：仅推送变更文档并正确合入其他设备新增', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  await putJson(srv.base, {
+    docs: [
+      { _id: 'settings:main', type: 'settings', study_method: 'blurting', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c1', { updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c2', { updated_at: '2026-01-01T00:00:00.000Z' })
+    ]
+  });
+
+  const h = createSandbox({
+    serverHook: async call => {
+      if (call.method === 'GET') {
+        const res = await fetch(`${srv.base}${call.url || '/api/store'}`);
+        return { ok: res.ok, status: res.status, body: await res.json() };
+      }
+      const res = await fetch(`${srv.base}/api/store`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(call.body)
+      });
+      return { ok: res.ok, status: res.status, body: await res.json() };
+    }
+  });
+  await settle(h);
+  h.fetchCalls.length = 0;
+
+  // 本地仅修改 c1，应该以 delta 模式推送且仅含 c1
+  await h.runAsync(`(async () => {
+    const c = await db.get('c1');
+    c.title = 'c1 本地微调';
+    await db.put(c);
+  })()`);
+  await h.wait(450);
+
+  const puts = h.putCalls();
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].body.mode, 'delta');
+  assert.deepEqual(puts[0].body.docs.map(d => d._id), ['c1'], 'delta 模式应只发送被修改的 c1');
+
+  const srvAfter = await getStore(srv.base);
+  assert.deepEqual(srvAfter.docs.map(d => d._id).sort(), ['c1', 'c2', 'settings:main']);
+  assert.equal(srvAfter.docs.find(d => d._id === 'c1').title, 'c1 本地微调');
+});
+
+test('R23 原生 IndexedDB 存储迁移与本轮错题回炉（requeueSameSession）', async () => {
+  const idbData = new Map();
+  const mockIdb = {
+    open() {
+      const storeNames = new Set();
+      const dbObj = {
+        objectStoreNames: { contains: name => storeNames.has(name) },
+        createObjectStore(name) { storeNames.add(name); return {}; },
+        transaction(_name, _mode) {
+          const tx = { oncomplete: null, onerror: null, onabort: null, error: null };
+          tx.objectStore = () => ({
+            get(key) {
+              const req = { result: undefined, onsuccess: null, onerror: null };
+              queueMicrotask(() => { req.result = idbData.get(key); req.onsuccess?.(); });
+              return req;
+            },
+            put(value, key) {
+              idbData.set(key, value);
+              queueMicrotask(() => { tx.oncomplete?.(); });
+              return {};
+            }
+          });
+          return tx;
+        }
+      };
+      const openReq = { result: dbObj, onupgradeneeded: null, onsuccess: null, onerror: null, onblocked: null };
+      queueMicrotask(() => {
+        openReq.onupgradeneeded?.();
+        openReq.onsuccess?.();
+      });
+      return openReq;
+    }
+  };
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    indexedDB: mockIdb,
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', scheduler_mode: 'adaptive', hold_interval_below_score: 60, study_method: 'blurting', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-requeue', { type: 'card', archived_at: null, title: '错题回炉卡', outline: '- **要点**', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' })
+    ]
+  });
+  await settle(h);
+
+  // 验证启动时已自动将 localStorage 旧库迁入 IndexedDB 并清理旧键
+  assert.equal(h.run('getLocalStorageBackendName()'), 'indexeddb');
+  assert.equal(h.storage.get('studystyle-fallback-v1'), undefined, '迁移后应清理 bloated localStorage 旧键');
+  assert.equal(h.storage.get('studystyle-idb-migrated-v1'), '1');
+  assert.ok(Array.isArray(idbData.get('docs')) && idbData.get('docs').some(d => d._id === 'c-requeue'));
+
+  // 验证低分开启 requeueSameSession 会将该卡追加到本轮队列末尾再次复习
+  await h.runAsync(`(async () => {
+    await beginReview();
+    assert.equal(reviewQueue.length, 1);
+    await selectScore(30, 1);
+    requeueSameSession = true;
+    await saveReview({ preventDefault() {} });
+    assert.equal($('#reviewDialog').open, true, '加入错题回炉后弹窗不应提前关闭');
+    assert.equal(reviewQueue.length, 2, '同一张卡应被追加到本轮队列末尾');
+    assert.equal(reviewIndex, 1);
+    await selectScore(80, 3);
+    requeueSameSession = false;
+    await saveReview({ preventDefault() {} });
+    assert.equal($('#reviewDialog').open, false, '第二次抽查通过后应正常结束本轮');
+  })()`);
+});
+
+test('R24 零上限分流保护、遗留无效历史容错、saveReview 防连击锁与 keepalive 冲刷', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const dueCards = Array.from({ length: 18 }, (_, i) =>
+    card(`c-cap-${i}`, {
+      type: 'card',
+      archived_at: null,
+      title: `上限卡 ${i}`,
+      outline: '- test',
+      due_date: today,
+      interval_index: 0,
+      latest_memory_score: null,
+      updated_at: '2026-01-01T00:00:00.000Z'
+    })
+  );
+  const h = createSandbox({
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', daily_review_limit: 0, scheduler_mode: 'adaptive', hold_interval_below_score: 60, study_method: 'blurting', updated_at: '2026-01-01T00:00:00.000Z' },
+      ...dueCards,
+      { _id: 'rev:legacy-broken', type: 'review', card_id: 'c-cap-0' }
+    ]
+  });
+  await settle(h);
+
+  // 1) daily_review_limit === 0 ("不设上限") 时 balanceOverdueNow 不得按默认 15 张偷偷分流
+  await h.runAsync('balanceOverdueNow()');
+  const dueAfter = h.localDocs().filter(d => d.type === 'card' && d.due_date === today);
+  assert.equal(dueAfter.length, 18, 'daily_review_limit=0 时应保留全部到期卡片，不能按 15 张上限分流');
+
+  // 2) renderHistory 遇到缺 reviewed_at / memory_score / next_due_date 的遗留记录不得渲染 Invalid Date 或 NaN%
+  await h.runAsync(`(async () => {
+    view = 'history';
+    await render();
+  })()`);
+  const historyHtml = h.el('viewRoot').innerHTML;
+  assert.ok(historyHtml.includes('未知日期'));
+  assert.ok(historyHtml.includes('时间未记录'));
+  assert.ok(historyHtml.includes('未评分'));
+  assert.equal(historyHtml.includes('Invalid Date'), false);
+  assert.equal(historyHtml.includes('NaN'), false);
+  assert.equal(historyHtml.includes('null%'), false);
+  assert.equal(historyHtml.includes('undefined%'), false);
+
+  // 3) saveReview 并发连击时只写入 1 条复习记录
+  await h.runAsync(`(async () => {
+    await beginReview();
+    await selectScore(80, 3);
+    await Promise.all([
+      saveReview({ preventDefault() {} }),
+      saveReview({ preventDefault() {} })
+    ]);
+  })()`);
+  const reviewDocs = h.localDocs().filter(d => d.type === 'review' && !d._deleted);
+  assert.equal(reviewDocs.length, 2, '原有 1 条 + 本次连击仅保存 1 条，共计 2 条');
+
+  // 4) flushServerStore({ keepalive: true }) 必须向 fetch 传递 keepalive 标记
+  h.fetchCalls.length = 0;
+  await h.runAsync(`(async () => {
+    await db.put({ _id: 'c-keepalive', type: 'card', title: '关闭前冲刷', outline: '- a', due_date: '${today}', interval_index: 0 });
+    flushServerStore({ keepalive: true });
+  })()`);
+  await settle(h);
+  const keepalivePut = h.putCalls().find(c => c.keepalive === true);
+  assert.ok(keepalivePut, 'pagehide/beforeunload 路径应透传 keepalive: true');
+});
+
+test('R25 saveNotebookFromDialog 并发防连击、markdownToHtml 无内联缩进与视图零静态 inline style', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    initialDocs: [
+      {
+        _id: 'settings:main',
+        type: 'settings',
+        notebooks: [{ name: '默认笔记本', color: 'indigo' }, { name: '旧科目', color: 'emerald' }],
+        updated_at: '2026-01-01T00:00:00.000Z'
+      },
+      card('c-r25', {
+        type: 'card',
+        archived_at: null,
+        notebook: '旧科目',
+        title: '笔记本测试卡',
+        outline: '- 一级要点\n  - 二级要点',
+        due_date: today,
+        interval_index: 0,
+        latest_memory_score: 80,
+        updated_at: '2026-01-01T00:00:00.000Z'
+      })
+    ]
+  });
+  await settle(h);
+
+  // 1) markdownToHtml 嵌套列表应转为 md-indent-* 类，不得产出内联 style=""；有序列表应保留 <ol>
+  const mdHtml = h.run("markdownToHtml('- 一级要点\\n  - 二级要点\\n    - 三级要点\\n1. 编号一\\n  2. 缩进编号二')");
+  assert.ok(mdHtml.includes('md-indent-1'));
+  assert.ok(mdHtml.includes('md-indent-2'));
+  assert.ok(mdHtml.includes('<ul>') && mdHtml.includes('<ol>'));
+  assert.equal(mdHtml.includes('style='), false);
+
+  // 2) saveNotebookFromDialog 并发连击只执行一次批量改名
+  await h.runAsync(`(async () => {
+    await openNotebookDialog('旧科目');
+    assert.ok($('#notebookOldName'));
+    $('#notebookNameInput').value = '新科目';
+    let bulkCalls = 0;
+    const origBulk = db.bulkDocs.bind(db);
+    db.bulkDocs = (...args) => { bulkCalls++; return origBulk(...args); };
+    await Promise.all([
+      saveNotebookFromDialog({ preventDefault() {} }),
+      saveNotebookFromDialog({ preventDefault() {} })
+    ]);
+    assert.equal(bulkCalls, 1, '并发连击 saveNotebookFromDialog 只应执行 1 次批量更新');
+    assert.equal($('#saveNotebookBtn').disabled, false, '保存完成后应恢复按钮可点击状态');
+  })()`);
+
+  const updatedCard = h.localDocs().find(d => d._id === 'c-r25');
+  assert.equal(updatedCard.notebook, '新科目');
+
+  // 3) settings / library / history 视图不应包含静态 style="..." 属性
+  for (const targetView of ['settings', 'library', 'history']) {
+    await h.runAsync(`(async () => {
+      view = '${targetView}';
+      await render();
+    })()`);
+    const viewHtml = h.el('viewRoot').innerHTML;
+    assert.equal(/\bstyle\s*=/.test(viewHtml), false, `${targetView} 视图不应包含内联 style 属性`);
+  }
+});
+
+test('R26 跳过防连击与随机续抽、弹窗内撤销不截断队列、脏日期容错与串行推送防伪冲突', async t => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  await putJson(srv.base, {
+    docs: [
+      { _id: 'settings:main', type: 'settings', study_method: 'blurting', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-q1', { type: 'card', archived_at: null, title: '队列卡 1', outline: '- ==**加粗词**==', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c-q2', { type: 'card', archived_at: null, title: '队列卡 2', outline: '- 要点 2', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c-q3', { type: 'card', archived_at: null, title: '队列卡 3', outline: '- 要点 3', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c-arch-bad', { type: 'card', archived_at: 123456, title: '脏归档卡', outline: '- x', due_date: 'bad-date', interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' })
+    ]
+  });
+
+  let delayFirstPut = true;
+  const h = createSandbox({
+    serverHook: async call => {
+      if (call.method === 'GET') {
+        const res = await fetch(`${srv.base}${call.url || '/api/store'}`);
+        return { ok: res.ok, status: res.status, body: await res.json() };
+      }
+      if (delayFirstPut) {
+        delayFirstPut = false;
+        await new Promise(r => setTimeout(r, 120));
+      }
+      const res = await fetch(`${srv.base}/api/store`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(call.body)
+      });
+      return { ok: res.ok, status: res.status, body: await res.json() };
+    }
+  });
+  await settle(h);
+
+  // 1) markdownToHtml 挖空按钮 aria-label 剥离内部 HTML 标签
+  const mdOut = h.run("markdownToHtml('==**加粗重点**==')");
+  assert.ok(mdOut.includes('aria-label="挖空：加粗重点，点击显示答案"'));
+  assert.ok(mdOut.includes('<strong>加粗重点</strong></button>'));
+
+  // 2) fmtDate / fmtDue / renderLibrary 容错非法 due_date 与非字符串 archived_at
+  assert.equal(h.run("fmtDate('not-a-date')"), '未安排');
+  assert.equal(h.run("fmtDue({ due_date: 'not-a-date' })").includes('Invalid Date'), false);
+  await h.runAsync("(async () => { view = 'library'; await render(); })()");
+  const libHtml = h.el('viewRoot').innerHTML;
+  assert.ok(libHtml.includes('未知日期'));
+  assert.equal(libHtml.includes('Invalid Date'), false);
+
+  // 3) skipCurrentCard 防连击锁 + 弹窗内 undoLastReview 保留后续复习队列
+  await h.runAsync(`(async () => {
+    await beginReview();
+    assert.equal(reviewQueue.length, 3);
+    await Promise.all([skipCurrentCard(), skipCurrentCard()]);
+    assert.equal(reviewIndex, 1, '连击跳过只应前进 1 张');
+    assert.equal(reviewQueue[reviewIndex]._id, 'c-q2');
+    await undoLastReview();
+    assert.equal(reviewIndex, 0, '撤销后应回到刚才那张');
+    assert.equal(reviewQueue.length, 3, '弹窗内撤销不得截断后续待复习队列');
+    assert.equal(reviewQueue[reviewIndex]._id, 'c-q1');
+  })()`);
+  const reviewsAfterUndo = h.localDocs().filter(d => d.type === 'review' && !d._deleted);
+  assert.equal(reviewsAfterUndo.length, 0, '连击跳过仅生成 1 条记录且撤销后应已被标记删除');
+
+  // 4) skipCurrentCard 在随机模式下应抽出下一张而不是结束会话
+  await h.runAsync(`(async () => {
+    await beginRandomReview();
+    assert.equal($('#reviewDialog').open, true);
+    await skipCurrentCard();
+    assert.equal($('#reviewDialog').open, true, '随机模式跳过后应继续抽下一张');
+    assert.equal(randomDrawCount, 2);
+  })()`);
+
+  // 5) 串行推送队列：两次紧邻 pushServerStoreNow 不得带同一个旧 base_rev 撞出伪合并冲突
+  await h.runAsync("flushServerStore()");
+  await h.wait(200);
+  h.fetchCalls.length = 0;
+  await h.runAsync(`(async () => {
+    const c1 = await db.get('c-q1');
+    const c2 = await db.get('c-q2');
+    const p1 = pushServerStoreNow([...(await allDocs())], new Set([c1._id]));
+    const p2 = pushServerStoreNow([...(await allDocs())], new Set([c2._id]));
+    await Promise.all([p1, p2]);
+  })()`);
+  for (let i = 0; i < 40 && (h.putCalls().length < 2 || h.run('Boolean(pushInFlightPromise)')); i++) await h.wait(25);
+  const serialPuts = h.putCalls();
+  assert.equal(serialPuts.length, 2);
+  assert.notEqual(serialPuts[0].body.base_rev, serialPuts[1].body.base_rev, '第二次推送必须等待第一次拿到新 rev 再发，绝不重复携带旧 base_rev');
+
+  // 6) hydrateFromServerStore 准确返回 { changed }
+  const noChange = await h.runAsync("hydrateFromServerStore({ incremental: true })");
+  assert.equal(noChange.changed, false);
+  await putJson(srv.base, {
+    docs: [card('c-remote-new', { title: '远端新增卡', outline: '- z', due_date: today, updated_at: '2026-12-01T00:00:00.000Z' })],
+    base_rev: (await getStore(srv.base)).rev,
+    mode: 'delta'
+  });
+  const withChange = await h.runAsync("hydrateFromServerStore({ incremental: true })");
+  assert.equal(withChange.changed, true);
+});
+
+test('R27 tags 非数组容错与导入归一化、已删卡片历史不污染默认本、批量建卡防连击及 remove 参数校验', async t => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-existing', { type: 'card', archived_at: null, title: '旧卡片', outline: '- old', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c-dirty-tags', { type: 'card', archived_at: null, title: '异常字符串标签卡', outline: '- outline', tags: '化学，实验', notebook: '化学', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      card('c-num-tags', { type: 'card', archived_at: null, title: '数字标签默认本卡', outline: '- outline', tags: 12345, notebook: '默认笔记本', due_date: today, interval_index: 0, latest_memory_score: null, updated_at: '2026-01-01T00:00:00.000Z' }),
+      { _id: 'rev-live-default', type: 'review', card_id: 'c-num-tags', reviewed_at: '2026-11-10T09:00:00.000Z', memory_score: 80, updated_at: '2026-11-10T09:00:00.000Z' },
+      { _id: 'rev-deleted-math', type: 'review', card_id: 'c-deleted-math', reviewed_at: '2026-11-10T10:00:00.000Z', memory_score: 40, note: '已删数学卡记录', updated_at: '2026-11-10T10:00:00.000Z' }
+    ]
+  });
+  await settle(h);
+
+  // 1) 非数组 tags 渲染 Today / Library 与打开编辑弹窗不得抛 TypeError
+  for (const targetView of ['today', 'library']) {
+    await h.runAsync(`(async () => { view = '${targetView}'; await render(); })()`);
+    const html = h.el('viewRoot').innerHTML;
+    assert.ok(html.includes('异常字符串标签卡'));
+    assert.ok(html.includes('化学'));
+    assert.ok(html.includes('数字标签默认本卡'));
+  }
+  await h.runAsync(`(async () => {
+    await openCardDialog(await db.get('c-dirty-tags'));
+    assert.equal($('#cardTags').value || $('#cardForm').elements.tags.value, '化学, 实验');
+    $('#cardDialog').close();
+    await openCardDialog(await db.get('c-num-tags'));
+    assert.equal($('#cardForm').elements.tags.value, '');
+    $('#cardDialog').close();
+  })()`);
+
+  // 2) importData 归一化字符串 tags、忽略 _deleted 条目并保留已存在卡更新
+  const importPayload = JSON.stringify({
+    docs: [
+      { _id: 'c-existing', type: 'card', title: '覆盖后的旧卡', outline: '- new', tags: '英语, 核心', notebook: '英语', due_date: today },
+      { _id: 'c-tombstone-skip', type: 'card', title: '死卡不应导入', outline: '- x', _deleted: true, due_date: today },
+      { _id: 'rev-tombstone-skip', type: 'review', card_id: 'c-existing', reviewed_at: '2026-11-11T09:00:00.000Z', _deleted: true }
+    ]
+  });
+  h.sandbox.__importFile = { text: async () => importPayload };
+  await h.runAsync('importData(__importFile)');
+  const importedCard = h.localDocs().find(d => d._id === 'c-existing');
+  assert.equal(importedCard.title, '覆盖后的旧卡');
+  assert.deepEqual(importedCard.tags, ['英语', '核心']);
+  assert.equal(h.localDocs().some(d => d._id === 'c-tombstone-skip'), false, '_deleted 条目不得被 importData 写入');
+  assert.equal(h.localDocs().some(d => d._id === 'rev-tombstone-skip'), false);
+
+  // 3) 筛选具体科目笔记本时，已删卡片历史记录不得归入默认笔记本；全部科目下仍可见
+  await h.runAsync(`(async () => {
+    activeNotebookFilter = '默认笔记本';
+    activeHistoryCardFilter = null;
+    view = 'history';
+    await render();
+  })()`);
+  const defaultHistoryHtml = h.el('viewRoot').innerHTML;
+  assert.ok(defaultHistoryHtml.includes('数字标签默认本卡'));
+  assert.equal(defaultHistoryHtml.includes('已删数学卡记录'), false, '已删除卡片的复习记录不得污染默认笔记本历史');
+  assert.equal(defaultHistoryHtml.includes('已删除卡片'), false);
+
+  await h.runAsync(`(async () => {
+    activeNotebookFilter = null;
+    view = 'history';
+    await render();
+  })()`);
+  assert.ok(h.el('viewRoot').innerHTML.includes('已删除卡片'));
+
+  // 4) batchCreateFromMarkdown 并发连击只提交 1 次
+  await h.runAsync(`(async () => {
+    view = 'library';
+    await render();
+    $('#batchMdInput').value = '# 批量卡一\\n- 要点一\\n# 批量卡二\\n- 要点二';
+    $('#batchMdTags').value = '高频，重点';
+    let bulkCalls = 0;
+    const origBulk = db.bulkDocs.bind(db);
+    db.bulkDocs = (...args) => { bulkCalls++; return origBulk(...args); };
+    await Promise.all([batchCreateFromMarkdown(), batchCreateFromMarkdown()]);
+    assert.equal(bulkCalls, 1, '并发连击 batchCreateFromMarkdown 只应批量创建 1 次');
+    assert.equal($('#runBatchImportBtn').disabled, false);
+  })()`);
+  const createdBatchCards = h.localDocs().filter(d => !d._deleted && d.type === 'card' && d.title.startsWith('批量卡'));
+  assert.equal(createdBatchCards.length, 2);
+  assert.deepEqual(createdBatchCards[0].tags, ['高频', '重点']);
+
+  // 5) createLocalStore().remove 拒绝非法 _id
+  await assert.rejects(() => h.runAsync("db.remove({ _id: 'bad\"id' })"), /非法的文档 _id/);
+});
+
+test('R28 migrateLocalDocsToPouch 双向墓碑不复活与 scheduleSyncRender 防打断聚焦输入', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', updated_at: '2026-01-01T00:00:00.000Z' },
+      { _id: 'c-deleted-on-server', _deleted: true, updated_at: '2026-11-12T00:00:00.000Z', deleted_at: '2026-11-12T00:00:00.000Z' },
+      card('c-deleted-in-pouch', { type: 'card', archived_at: null, title: '已在Pouch删除卡', outline: '- p', due_date: today, updated_at: '2026-11-10T00:00:00.000Z' }),
+      card('c-live', { type: 'card', archived_at: null, title: '正常存活卡', outline: '- ok', due_date: today, updated_at: '2026-11-10T00:00:00.000Z' })
+    ]
+  });
+  await settle(h);
+
+  // 构造既有 PouchDB：含一张在服务端已删但 PouchDB 仍存活的卡，以及一张在 PouchDB 已删（reason: 'deleted'）的卡
+  const pouchStore = new Map([
+    ['c-deleted-on-server', { _id: 'c-deleted-on-server', _rev: '1-old', type: 'card', title: '服务端已删但Pouch残留', outline: '- x', due_date: today, updated_at: '2026-11-01T00:00:00.000Z' }],
+    ['c-deleted-in-pouch', { _id: 'c-deleted-in-pouch', _rev: '2-del', _deleted: true }]
+  ]);
+  h.sandbox.PouchDB = function MockMigrationPouch() {
+    this.allDocs = async () => ({
+      rows: [...pouchStore.values()].filter(d => !d._deleted).map(d => ({ doc: { ...d } }))
+    });
+    this.get = async id => {
+      const doc = pouchStore.get(id);
+      if (!doc) throw { status: 404, name: 'not_found', reason: 'missing' };
+      if (doc._deleted) throw { status: 404, name: 'not_found', reason: 'deleted' };
+      return { ...doc };
+    };
+    this.put = async doc => {
+      const copy = { ...doc, _rev: `2-${Math.random().toString(16).slice(2, 8)}` };
+      pouchStore.set(copy._id, copy);
+      return { ok: true, id: copy._id, rev: copy._rev };
+    };
+    this.changes = () => ({ on() { return this; }, cancel() {} });
+  };
+
+  await h.runAsync('migrateLocalDocsToPouch()');
+  assert.equal(Boolean(pouchStore.get('c-deleted-on-server')?._deleted), true, 'fallbackDocs 中的删除墓碑必须同步删除既有 PouchDB 中的残留存活卡');
+  assert.equal(Boolean(pouchStore.get('c-deleted-in-pouch')?._deleted), true, '已在 PouchDB 删除的卡片不得被旧 fallbackDocs 复活');
+  assert.equal(pouchStore.get('c-live')?.title, '正常存活卡');
+
+  // scheduleSyncRender：当用户正在 #viewRoot 内的输入框打字时延后重绘，失焦后再执行重绘
+  const focusedInput = { tagName: 'INPUT' };
+  h.el('viewRoot').contains = node => node === focusedInput;
+  h.sandbox.document.activeElement = focusedInput;
+  h.el('viewRoot').innerHTML = 'USER_TYPING_SNAPSHOT';
+  h.run('scheduleSyncRender()');
+  await h.wait(300);
+  assert.equal(h.el('viewRoot').innerHTML, 'USER_TYPING_SNAPSHOT', '输入框聚焦期间后台同步不得冲掉 #viewRoot');
+  h.sandbox.document.activeElement = null;
+  await h.wait(320);
+  assert.notEqual(h.el('viewRoot').innerHTML, 'USER_TYPING_SNAPSHOT', '失焦后应自动完成延后的同步重绘');
+});
+
+test('R29 批量迁库/离线Pouch切换、切回前台重连、列表插标光标与快捷键404兜底', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    onLine: false,
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-batch-new', { type: 'card', archived_at: null, title: '新增批量迁移卡', outline: '- a', due_date: today, updated_at: '2026-11-12T00:00:00.000Z' }),
+      card('c-batch-deleted', { type: 'card', archived_at: null, title: 'Pouch已删卡', outline: '- b', due_date: today, updated_at: '2026-11-10T00:00:00.000Z' })
+    ]
+  });
+  await settle(h);
+
+  // 1) insertMarkdownFormat('list') 无选区时选区范围不得倒置（选中占位文本「要点内容」）
+  const ta = h.el('cardOutline');
+  ta.value = '';
+  ta.selectionStart = 0;
+  ta.selectionEnd = 0;
+  let capturedRange = null;
+  ta.setSelectionRange = (s, e) => { capturedRange = [s, e]; };
+  h.run(`insertMarkdownFormat('list')`);
+  assert.equal(ta.value, '- 要点内容');
+  assert.deepEqual(capturedRange, [2, 6], '插入列表占位符应选中「要点内容」，不能出现 selectionEnd < selectionStart');
+
+  // 2) migrateLocalDocsToPouch 优先走 allDocs({ keys }) + bulkDocs，不退化为 N 次串行 get()
+  const gottenIds = [];
+  let bulkCalls = 0;
+  let syncCalls = 0;
+  const pouchMap = new Map([
+    ['c-batch-deleted', { _id: 'c-batch-deleted', _rev: '2-del', _deleted: true }]
+  ]);
+  h.sandbox.PouchDB = function BatchMockPouch() {
+    this.allDocs = async (opts = {}) => {
+      if (Array.isArray(opts.keys)) {
+        return {
+          rows: opts.keys.map(k => {
+            const d = pouchMap.get(k);
+            if (!d) return { key: k, error: 'not_found' };
+            if (d._deleted) return { id: k, key: k, value: { rev: d._rev, deleted: true } };
+            return { id: k, key: k, value: { rev: d._rev }, doc: { ...d } };
+          })
+        };
+      }
+      return { rows: [...pouchMap.values()].filter(d => !d._deleted).map(d => ({ doc: { ...d } })) };
+    };
+    this.get = async id => {
+      gottenIds.push(id);
+      const d = pouchMap.get(id);
+      if (!d) throw { status: 404, name: 'not_found', reason: 'missing' };
+      if (d._deleted) throw { status: 404, name: 'not_found', reason: 'deleted' };
+      return { ...d };
+    };
+    this.bulkDocs = async list => {
+      bulkCalls++;
+      for (const item of list) {
+        const saved = { ...item, _rev: `1-${Math.random().toString(16).slice(2, 8)}` };
+        pouchMap.set(saved._id, saved);
+      }
+      return list.map(d => ({ ok: true, id: d._id }));
+    };
+    this.put = async d => ({ ok: true, id: d._id, rev: '1-p' });
+    this.changes = () => ({ on() { return this; }, cancel() {} });
+    this.info = async () => ({ db_name: 'studystyle' });
+    this.remove = async () => ({ ok: true });
+    this.sync = () => { syncCalls++; return { on() { return this; }, cancel() {} }; };
+  };
+  h.storage.set('studystyle-couch-local-v1', JSON.stringify({ mode: 'proxy', name: 'studystyle', autoConnect: true }));
+
+  await h.runAsync('resumeSavedCouchSync()');
+  assert.equal(h.run('pouchMode'), true, '离线冷启动有已保存 Couch 配置时也应切到本地 PouchDB');
+  assert.equal(gottenIds.includes('c-batch-new'), false, '支持 allDocs({ keys }) 时不应逐条调用 pouch.get');
+  assert.equal(gottenIds.includes('c-batch-deleted'), false, '支持 allDocs({ keys }) 时不应逐条探测墓碑');
+  assert.equal(bulkCalls, 1, '迁移写入应合并为单次 bulkDocs 事务');
+  assert.equal(pouchMap.has('c-batch-new'), true);
+  assert.equal(pouchMap.get('c-batch-deleted')._deleted, true);
+  assert.equal(syncCalls, 0, '离线模式下不应触发远端复制');
+
+  // 3) 切回前台 visibilitychange -> visible 时，若 syncHandler 为空应自动调用 resumeSavedCouchSync 重连
+  h.sandbox.navigator.onLine = true;
+  h.sandbox.document.visibilityState = 'visible';
+  for (const fn of h.docListeners.visibilitychange || []) fn();
+  await h.wait(150);
+  assert.equal(syncCalls, 1, '切回前台 visible 时若 syncHandler 断开应自动恢复 CouchDB 同步');
+
+  // 4) 复习弹窗按 E 键编辑已删卡片时，捕获 404 并温和提示而非未捕获异常
+  h.el('reviewDialog').open = true;
+  h.run(`reviewQueue = [{ _id: 'c-missing-during-review' }]; reviewIndex = 0;`);
+  for (const fn of h.docListeners.keydown || []) {
+    await fn({
+      key: 'e',
+      code: 'KeyE',
+      isComposing: false,
+      target: { tagName: 'DIV', matches: () => false },
+      preventDefault() {}
+    });
+  }
+  assert.match(h.el('toast').textContent, /删除|同步/);
+});
+
+test('R30 表单提交异常提示与复习 409 冲突自动重拉合并', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-conflict', { type: 'card', archived_at: null, title: '冲突测试卡', outline: '- 要点', due_date: today, updated_at: '2026-11-10T00:00:00.000Z' })
+    ]
+  });
+  await settle(h);
+
+  // 1) saveCardFromDialog 遇写入错误时弹窗 toast 提示，不得静默卡死
+  await h.runAsync(`(async () => {
+    await openCardDialog(await db.get('c-conflict'));
+    const origPut = db.put.bind(db);
+    db.put = async () => { throw { status: 409, name: 'conflict', message: 'Document update conflict' }; };
+    try {
+      await saveCardFromDialog({ preventDefault() {} });
+    } finally {
+      db.put = origPut;
+    }
+  })()`);
+  assert.match(h.el('toast').textContent, /冲突|其他设备|刷新/);
+  assert.equal(h.el('cardDialog').open, true, '保存失败时不该关闭编辑弹窗丢失用户输入');
+
+  // 2) saveNotebookFromDialog 遇错误时 toast 提示并恢复锁状态
+  await h.runAsync(`(async () => {
+    await openNotebookDialog();
+    $('#notebookNameInput').value = '异常笔记本';
+    const origPut = db.put.bind(db);
+    db.put = async () => { throw new Error('磁盘只读'); };
+    try {
+      await saveNotebookFromDialog({ preventDefault() {} });
+    } finally {
+      db.put = origPut;
+    }
+  })()`);
+  assert.match(h.el('toast').textContent, /保存笔记本失败.*磁盘只读/);
+  assert.equal(h.run('isSavingNotebook'), false);
+
+  // 3) saveReview 遇卡片在另一端被删（404）时 toast 提示且解锁按钮
+  await h.runAsync(`(async () => {
+    reviewQueue = [{ _id: 'c-gone-during-review' }];
+    reviewIndex = 0;
+    selectedScore = 80;
+    $('#reviewDialog').open = true;
+    await saveReview({ preventDefault() {} });
+  })()`);
+  assert.match(h.el('toast').textContent, /删除|同步/);
+  assert.equal(h.run('isSavingReview'), false);
+  assert.equal(h.el('saveReview').disabled, false);
+
+  // 4) saveReview 在 db.bulkDocs 返回卡文档 409 冲突时自动重拉最新 _rev 重试写入，且不重复创建第二条 review
+  await h.runAsync(`(async () => {
+    reviewQueue = [await db.get('c-conflict')];
+    reviewIndex = 0;
+    selectedScore = 80;
+    $('#reviewDialog').open = true;
+    $('#reviewForm').elements.recall.value = '回忆内容';
+    globalThis.__bulkAttempts = 0;
+    globalThis.__putRetryCardRev = '';
+    const origBulk = db.bulkDocs.bind(db);
+    const origGet = db.get.bind(db);
+    const origPut = db.put.bind(db);
+    db.bulkDocs = async list => {
+      globalThis.__bulkAttempts++;
+      if (globalThis.__bulkAttempts === 1) {
+        const revDoc = list.find(d => d.type === 'review');
+        await origBulk([revDoc]);
+        return [
+          { id: 'c-conflict', error: true, status: 409, name: 'conflict' },
+          { id: revDoc._id, ok: true, rev: '1-rev' }
+        ];
+      }
+      return origBulk(list);
+    };
+    db.get = async id => {
+      const doc = await origGet(id);
+      return { ...doc, _rev: '9-latest-from-couch' };
+    };
+    db.put = async doc => {
+      globalThis.__putRetryCardRev = doc._rev;
+      return origPut(doc);
+    };
+    try {
+      await saveReview({ preventDefault() {} });
+    } finally {
+      db.bulkDocs = origBulk;
+      db.get = origGet;
+      db.put = origPut;
+    }
+  })()`);
+  assert.equal(h.sandbox.__bulkAttempts, 1, 'review 首次已成功，重试时不应二次提交 bulkDocs 产生重复复习记录');
+  assert.equal(h.sandbox.__putRetryCardRev, '9-latest-from-couch', '冲突重试必须带最新 _rev 合并写回卡片');
+  const updatedConflictCard = h.localDocs().find(d => d._id === 'c-conflict');
+  assert.equal(updatedConflictCard.latest_memory_score, 80);
+  const reviewsForConflict = h.localDocs().filter(d => !d._deleted && d.type === 'review' && d.card_id === 'c-conflict');
+  assert.equal(reviewsForConflict.length, 1, '409 冲突重试后只应保留 1 条复习记录');
+});
+
+test('R31 撤销复习/跳过容错、删本防连击 409 重试与复习中编辑 404 兜底', async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const h = createSandbox({
+    initialDocs: [
+      { _id: 'settings:main', type: 'settings', notebooks: [{ name: '旧科目', color: 'indigo' }], updated_at: '2026-01-01T00:00:00.000Z' },
+      card('c-r31-a', { type: 'card', archived_at: null, title: '并发卡A', notebook: '旧科目', outline: '- 要点', due_date: today, updated_at: '2026-11-10T00:00:00.000Z' })
+    ]
+  });
+  await settle(h);
+
+  // 1) undoLastReview 写入失败时保留快照并弹窗提示，随后遇到 409 冲突可自动带最新 _rev 完成撤销
+  await h.runAsync(`(async () => {
+    await beginReview();
+    await selectScore(80, 3);
+    await saveReview({ preventDefault() {} });
+    assert.ok(lastReviewSnapshot, '保存后应保留撤销快照');
+
+    const origBulk = db.bulkDocs.bind(db);
+    const origGet = db.get.bind(db);
+    const origPut = db.put.bind(db);
+    db.bulkDocs = async () => { throw new Error('短暂写入失败'); };
+    try {
+      await undoLastReview();
+    } finally {
+      db.bulkDocs = origBulk;
+    }
+    assert.ok(lastReviewSnapshot, '撤销失败时不得提前丢弃撤销快照');
+    assert.equal(isSavingReview, false);
+
+    let putRev = '';
+    db.bulkDocs = async () => [{ id: 'c-r31-a', error: true, status: 409, name: 'conflict' }];
+    db.get = async id => {
+      const doc = await origGet(id);
+      return doc ? { ...doc, _rev: '12-remote-rev' } : doc;
+    };
+    db.put = async doc => {
+      putRev = doc._rev;
+      return origPut(doc);
+    };
+    try {
+      await undoLastReview();
+    } finally {
+      db.bulkDocs = origBulk;
+      db.get = origGet;
+      db.put = origPut;
+    }
+    globalThis.__undoRetryRev = putRev;
+  })()`);
+  assert.match(h.el('toast').textContent, /已撤销|短暂写入失败/);
+  assert.equal(h.run('lastReviewSnapshot'), null, '撤销真正成功后才应清空快照');
+  assert.equal(h.sandbox.__undoRetryRev, '12-remote-rev');
+
+  // 2) skipCurrentCard 遇异常时提示用户并释放按钮/锁
+  await h.runAsync(`(async () => {
+    reviewQueue = [await db.get('c-r31-a')];
+    reviewIndex = 0;
+    $('#reviewDialog').open = true;
+    const origBulk = db.bulkDocs.bind(db);
+    db.bulkDocs = async () => { throw new Error('跳过写入异常'); };
+    try {
+      await skipCurrentCard();
+    } finally {
+      db.bulkDocs = origBulk;
+    }
+  })()`);
+  assert.match(h.el('toast').textContent, /跳过卡片失败.*跳过写入异常/);
+  assert.equal(h.run('isSavingReview'), false);
+  assert.equal(h.el('skipCard').disabled, false);
+
+  // 3) deleteNotebook 迁移遇到 409 冲突会自动重拉最新 _rev 归入默认笔记本，再删除设置项
+  await h.runAsync(`(async () => {
+    askConfirm = async () => true;
+    const origBulk = db.bulkDocs.bind(db);
+    const origGet = db.get.bind(db);
+    const origPut = db.put.bind(db);
+    let migratedRev = '';
+    db.bulkDocs = async () => [{ id: 'c-r31-a', error: true, status: 409, name: 'conflict' }];
+    db.get = async id => {
+      const doc = await origGet(id);
+      return doc ? { ...doc, _rev: '15-nb-conflict' } : doc;
+    };
+    db.put = async doc => {
+      migratedRev = doc._rev;
+      return origPut(doc);
+    };
+    try {
+      await deleteNotebook('旧科目');
+    } finally {
+      db.bulkDocs = origBulk;
+      db.get = origGet;
+      db.put = origPut;
+    }
+    globalThis.__nbMigrateRev = migratedRev;
+  })()`);
+  assert.equal(h.sandbox.__nbMigrateRev, '15-nb-conflict');
+  assert.equal(h.localDocs().find(d => d._id === 'c-r31-a')?.notebook, '默认笔记本');
+  assert.equal(h.run('isSavingNotebook'), false);
+
+  // 4) 复习中目标卡片在别处被删后，点击编辑只给友好提示不抛 404
+  await h.runAsync(`(async () => {
+    reviewQueue = [{ _id: 'c-deleted-elsewhere' }];
+    reviewIndex = 0;
+    await openCurrentReviewCardEditor();
+  })()`);
+  assert.match(h.el('toast').textContent, /已被删除|尚未同步/);
 });

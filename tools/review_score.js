@@ -1,1 +1,0 @@
-(async()=>{document.querySelector('[data-action="start-today"]')?.click(); await new Promise(r=>setTimeout(r,900)); document.querySelector('#goToScore')?.click(); await new Promise(r=>setTimeout(r,1000)); return document.querySelector('#reviewDialog')?.open ? 'score step open' : 'closed';})()

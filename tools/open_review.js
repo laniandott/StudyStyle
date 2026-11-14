@@ -1,1 +1,0 @@
-(async()=>{const b=document.querySelector('[data-action="start-today"]'); if(b){b.click(); await new Promise(r=>setTimeout(r,900));} return document.querySelector('#reviewDialog')?.open ? 'dialog open' : 'no dialog';})()

@@ -91,3 +91,32 @@ node server.mjs
 # 运行单元与集成测试
 node --test
 ```
+
+---
+
+## 四、HTTPS 反向代理与 PWA 完整离线部署（Caddy 模板）
+
+浏览器要求通过 **HTTPS**（或 `localhost`）访问才能完整激活 Service Worker 离线缓存与「一键安装到主屏幕 / 桌面」功能。项目在 [deploy/](./deploy/) 目录提供了即用的 Caddy 自动 HTTPS 模板：
+
+```bash
+# 1. 配置域名与可选访问令牌 STORE_TOKEN
+export STUDYSTYLE_DOMAIN=notes.example.com
+export STORE_TOKEN=your-strong-random-token
+
+# 2. 启动 StudyStyle + Caddy 自动签发 Let's Encrypt 证书
+docker compose -f deploy/docker-compose.https.yml up -d --build
+```
+
+> 若服务端启用了 `STORE_TOKEN`，首次打开网页后可在 **设置 → 多设备同步 → 同源服务访问令牌（STORE_TOKEN）** 中填写该令牌并点击「保存令牌并同步」，仅保存于当前浏览器本地 `localStorage`，不会写入导出备份或同步文档。
+
+> 若需要同步到外部 CouchDB 且**不希望浏览器本地保存任何 CouchDB 明文密码**，可在服务端环境变量配置 `COUCH_PROXY_URL`、`COUCH_PROXY_USER`、`COUCH_PROXY_PASSWORD`（可选 `COUCH_PROXY_DB`），搭配 `STORE_TOKEN` 后前端设置页会自动识别「服务端 CouchDB 安全代理」一键双向同步。
+
+---
+
+## 五、UI 端到端回归测试（Headless Browser CDP）
+
+在已安装 Microsoft Edge 或 Google Chrome 的环境中，运行测试套件会自动启动本地服务器并通过 Chrome DevTools Protocol 验证桌面（`1280×800`）与移动端（`390×844` / `540×900`）布局、底部导航无遮挡以及 `⋯` 悬浮操作菜单命中测试：
+
+```bash
+node --test
+```

@@ -1,1 +1,0 @@
-(async()=>{const el=document.querySelector('.band-limit'); if(!el) return 'no .band-limit'; const cs=getComputedStyle(el); const band=document.querySelector('.today-band'); const bg=getComputedStyle(band).backgroundColor; return {color:cs.color, bandBg:bg};})()

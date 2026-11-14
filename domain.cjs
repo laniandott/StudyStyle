@@ -91,10 +91,143 @@
     return intervals[safeIndex];
   }
 
+  function computeCardInterval(card, intervals = DEFAULT_INTERVALS, schedulerMode = 'adaptive') {
+    if (schedulerMode === 'adaptive' && Number.isFinite(Number(card?.next_interval_days)) && Number(card.next_interval_days) >= 1) {
+      return Math.round(Number(card.next_interval_days));
+    }
+    return intervalDays(card?.interval_index, intervals);
+  }
+
   function addLocalDays(day, amount) {
     const date = new Date(`${day}T12:00:00`);
     date.setDate(date.getDate() + amount);
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function nearestIntervalIndex(days, intervals = DEFAULT_INTERVALS) {
+    let best = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < intervals.length; i++) {
+      const diff = Math.abs(intervals[i] - days);
+      if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+  }
+
+  function clampNumber(val, min, max) {
+    return Math.min(max, Math.max(min, val));
+  }
+
+  /**
+   * FSRS-inspired adaptive spaced repetition step using continuous stability & difficulty.
+   */
+  function nextAdaptiveSchedule(cardState = {}, score, mode = 'hold', reviewedDay, intervals = DEFAULT_INTERVALS, options = {}) {
+    if (!Array.isArray(intervals) || intervals.length === 0 || intervals.some(day => !Number.isInteger(day) || day < 1)) {
+      throw new TypeError('Intervals must be a non-empty array of positive whole days');
+    }
+    const bag = scoreToBag(score);
+    const passThreshold = Number.isFinite(options?.passThreshold) ? options.passThreshold : 60;
+    const adaptiveLeap = Boolean(options?.adaptiveLeap);
+    const maxDays = Math.max(30, Math.min(365, Math.trunc(Number(options?.maxDays) || 365)));
+
+    const prevIndex = Math.max(0, Math.min(Math.trunc(cardState?.interval_index || 0), intervals.length - 1));
+    const prevStability = Number.isFinite(Number(cardState?.stability)) && Number(cardState.stability) > 0
+      ? Number(cardState.stability)
+      : (cardState?.last_reviewed_at ? intervalDays(prevIndex, intervals) : 1);
+    const prevDifficulty = Number.isFinite(Number(cardState?.difficulty))
+      ? clampNumber(Number(cardState.difficulty), 1, 10)
+      : 5;
+    const prevReps = Math.max(0, Math.trunc(Number(cardState?.reps) || (cardState?.last_reviewed_at ? 1 : 0)));
+    const prevLapses = Math.max(0, Math.trunc(Number(cardState?.lapses) || 0));
+
+    let nextStability = prevStability;
+    let nextDifficulty = prevDifficulty;
+    let nextReps = prevReps;
+    let nextLapses = prevLapses;
+    let days;
+
+    if (score < passThreshold) {
+      const missRatio = clampNumber((passThreshold - score) / Math.max(1, passThreshold), 0.1, 1);
+      nextDifficulty = Number(clampNumber(prevDifficulty + 0.5 + missRatio * 0.9, 1, 10).toFixed(2));
+      if (mode === 'reset') {
+        nextStability = Math.max(1, Number((prevStability * 0.25).toFixed(2)));
+        nextLapses = prevLapses + 1;
+        days = 1;
+      } else if (mode === 'advance') {
+        nextStability = Math.max(1, Number((prevStability * 1.1).toFixed(2)));
+        nextReps = prevReps + 1;
+        days = Math.max(1, Math.min(maxDays, Math.round(nextStability)));
+      } else {
+        /* hold：按稳定度软着陆，收缩本次等待天数而非盲目拉长，同时记录遗忘 */
+        nextStability = Math.max(1, Number((prevStability * 0.65).toFixed(2)));
+        nextLapses = prevLapses + 1;
+        days = Math.max(1, Math.min(intervalDays(prevIndex, intervals), Math.round(nextStability)));
+      }
+    } else {
+      const quality = clampNumber((score - passThreshold) / Math.max(1, 100 - passThreshold), 0, 1);
+      nextDifficulty = Number(clampNumber(prevDifficulty + (0.45 - 1.35 * quality), 1, 10).toFixed(2));
+      nextReps = prevReps + 1;
+
+      if (prevReps === 0) {
+        const minInit = intervals[0] || 1;
+        nextStability = Number(clampNumber(minInit + quality * 4.5, minInit, 7).toFixed(2));
+      } else {
+        let elapsedDays = prevStability;
+        if (cardState?.last_reviewed_at) {
+          const rawReviewedAt = String(cardState.last_reviewed_at);
+          let prevDayStr = rawReviewedAt.slice(0, 10);
+          if (rawReviewedAt.includes('T')) {
+            const parsedPrev = new Date(rawReviewedAt);
+            if (Number.isFinite(parsedPrev.getTime())) {
+              prevDayStr = `${parsedPrev.getFullYear()}-${String(parsedPrev.getMonth() + 1).padStart(2, '0')}-${String(parsedPrev.getDate()).padStart(2, '0')}`;
+            } else {
+              prevDayStr = '';
+            }
+          }
+          if (/^\d{4}-\d{2}-\d{2}$/.test(prevDayStr)) {
+            const diffMs = new Date(`${reviewedDay}T12:00:00`).getTime() - new Date(`${prevDayStr}T12:00:00`).getTime();
+            if (Number.isFinite(diffMs)) elapsedDays = Math.max(1, Math.round(diffMs / 86400000));
+          }
+        }
+        /* 回忆间隔越久且仍答出，给予适当的间距效应加成 */
+        const retrievability = Math.pow(0.9, elapsedDays / Math.max(1, prevStability));
+        const spacingBonus = 1 + clampNumber(1 - retrievability, 0, 0.7) * 0.85;
+        const baseGrowth = 1.2 + quality * 1.5;
+        const difficultyFactor = clampNumber((11 - nextDifficulty) / 6, 0.55, 1.45);
+        const leapBoost = adaptiveLeap && score >= 85 ? 1.3 : 1;
+        let factor = baseGrowth * difficultyFactor * spacingBonus * leapBoost;
+        if (score >= 60) factor = Math.max(factor, 1.2);
+        nextStability = Number(clampNumber(Math.max(prevStability + (score >= 60 ? 1 : 0), prevStability * factor), 1, maxDays).toFixed(2));
+      }
+      days = Math.max(1, Math.min(maxDays, Math.round(nextStability)));
+    }
+
+    if (days >= 5 && options?.fuzzSeed != null && score >= passThreshold) {
+      const seedStr = `${options.fuzzSeed}:${reviewedDay}`;
+      let hash = 2166136261;
+      for (let i = 0; i < seedStr.length; i++) {
+        hash = ((hash ^ seedStr.charCodeAt(i)) * 16777619) >>> 0;
+      }
+      const span = days >= 21 ? 2 : 1;
+      const offset = (hash % (span * 2 + 1)) - span;
+      days = Math.max(2, Math.min(maxDays, days + offset));
+    }
+
+    const intervalIndex = mode === 'reset' && score < passThreshold
+      ? 0
+      : nearestIntervalIndex(days, intervals);
+
+    return {
+      intervalIndex,
+      days,
+      dueDate: addLocalDays(reviewedDay, days),
+      bag,
+      stability: nextStability,
+      difficulty: nextDifficulty,
+      reps: nextReps,
+      lapses: nextLapses,
+      schedulerMode: 'adaptive'
+    };
   }
 
   function nextSchedule(intervalIndex, score, mode, reviewedDay, intervals = DEFAULT_INTERVALS, options = {}) {
@@ -120,7 +253,15 @@
       /* 用宽容版取袋：脏分数不应让整个队列排序抛错导致整页白屏 */
       const aBag = scoreToBagSafe(a.latest_memory_score);
       const bBag = scoreToBagSafe(b.latest_memory_score);
-      return aBag - bBag || a.due_date.localeCompare(b.due_date) || a.created_at.localeCompare(b.created_at);
+      if (aBag !== bBag) return aBag - bBag;
+      const dueDiff = String(a.due_date || '').localeCompare(String(b.due_date || ''));
+      if (dueDiff !== 0) return dueDiff;
+      /* 同优先级且同到期日下：屡次遗忘和高难度顽固错题排前面 */
+      const lapseDiff = (Number(b.lapses) || 0) - (Number(a.lapses) || 0);
+      if (lapseDiff !== 0) return lapseDiff;
+      const diffDelta = (Number(b.difficulty) || 5) - (Number(a.difficulty) || 5);
+      if (Math.abs(diffDelta) >= 0.5) return diffDelta;
+      return String(a.created_at || '').localeCompare(String(b.created_at || ''));
     });
   }
 
@@ -155,8 +296,11 @@
       return activePool[index];
     }
     const weights = activePool.map(card => {
-      const bag = scoreToBag(card.latest_memory_score);
-      return bag < 0 ? 5 : (5 - bag);
+      const bag = scoreToBagSafe(card.latest_memory_score);
+      const baseWeight = bag < 0 ? 5 : (5 - bag);
+      const lapsesBoost = Math.min(6, Math.max(0, Number(card.lapses) || 0) * 2);
+      const diffBoost = Math.max(0, Number(card.difficulty || 5) - 5) * 0.5;
+      return baseWeight + lapsesBoost + diffBoost;
     });
     const totalWeight = weights.reduce((sum, w) => sum + w, 0);
     let threshold = rng() * totalWeight;
@@ -177,13 +321,23 @@
     return [...terms];
   }
 
+  function termMatchedInText(normalizedText, term) {
+    if (!normalizedText || !term) return false;
+    const lowerTerm = term.toLowerCase();
+    if (/^[a-z0-9_]+$/i.test(lowerTerm)) {
+      const escaped = lowerTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`(?<![a-z0-9_])${escaped}(?![a-z0-9_])`, 'i').test(normalizedText);
+    }
+    return normalizedText.includes(lowerTerm);
+  }
+
   function checkKeyTermHits(outline, recallText) {
     const terms = extractKeyTerms(outline);
     const normalized = String(recallText || '').toLowerCase();
     const hits = [];
     const missed = [];
     for (const term of terms) {
-      if (normalized && normalized.includes(term.toLowerCase())) hits.push(term);
+      if (termMatchedInText(normalized, term)) hits.push(term);
       else missed.push(term);
     }
     return { total: terms.length, hitCount: hits.length, hits, missed };
@@ -313,8 +467,10 @@
     pickNewerDoc,
     reconcileDocSets,
     intervalDays,
+    computeCardInterval,
     addLocalDays,
     nextSchedule,
+    nextAdaptiveSchedule,
     sortDueCards,
     interleaveByNotebook,
     pickRandomCard,
